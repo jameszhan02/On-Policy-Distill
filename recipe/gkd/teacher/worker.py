@@ -41,6 +41,8 @@ def main():
                         help="vLLM max_num_batched_tokens.")
     parser.add_argument("--max-model-len", type=int, default=30720,
                         help="vLLM max_model_len (prompt+generation).")
+    parser.add_argument("--enforce-eager", action="store_true",
+                        help="Disable CUDA graph capture to reduce smoke-test memory usage.")
     # vLLM HTTP engine options (backend=vllm_http)
     parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000",
                         help="URL of the vLLM OpenAI-compatible server (for vllm_http backend).")
@@ -58,6 +60,7 @@ def main():
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_model_len=args.max_model_len,
+            enforce_eager=args.enforce_eager,
             distributed_executor_backend=args.distributed_executor_backend,
         )
     elif args.backend == "vllm_http":

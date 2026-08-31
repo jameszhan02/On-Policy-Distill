@@ -85,6 +85,7 @@ class VLLMEngine:
         gpu_memory_utilization=0.5,
         max_num_batched_tokens=8192,
         max_model_len=30720,
+        enforce_eager=False,
         distributed_executor_backend=None,
     ):
         self.n_logprobs = n_logprobs
@@ -107,6 +108,7 @@ class VLLMEngine:
             gpu_memory_utilization=gpu_memory_utilization,
             max_num_batched_tokens=max_num_batched_tokens,
             max_model_len=max_model_len,
+            enforce_eager=enforce_eager,
             # Limit parallel weight loading to avoid CPU OOM on large models
             max_parallel_loading_workers=2,
             **extra_kwargs,
