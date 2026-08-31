@@ -37,6 +37,15 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.inputs import TokensPrompt
 
 
+try:
+    from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+
+    if not hasattr(Qwen2Tokenizer, "all_special_tokens_extended"):
+        Qwen2Tokenizer.all_special_tokens_extended = property(lambda self: self.all_special_tokens)
+except Exception:
+    pass
+
+
 # ============================================================================
 # Monkey-patch LogprobsProcessor to store raw tensor/numpy logprobs
 # instead of detokenizing into Logprob dicts.
