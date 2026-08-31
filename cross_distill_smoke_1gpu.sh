@@ -88,6 +88,8 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='left' \
     data.shuffle=True \
     data.seed=44 \
+    data.dataloader_num_workers=0 \
+    data.filter_overlong_prompts_workers=1 \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \

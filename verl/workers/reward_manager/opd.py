@@ -183,6 +183,7 @@ class TeacherClient:
             - LLaMA 3.x (student) -> Qwen (teacher)
             - LLaMA 3.x (student) -> DeepSeek (teacher)
             - Qwen (student) -> DeepSeek (teacher)
+            - Qwen (student) -> LLaMA 3.x (teacher) [newly added, not yet validated end-to-end]
             - Qwen (student) -> Qwen (teacher) [same chat template, no mapping needed]
             - DeepSeek (student) -> DeepSeek (teacher) [same chat template, no mapping needed]
 
@@ -240,6 +241,33 @@ class TeacherClient:
                 ("<|im_end|>\n", "<｜end▁of▁sentence｜>"),
                 ("<|im_end|>", "<｜end▁of▁sentence｜>"),
                 ("<|endoftext|>", "<｜end▁of▁sentence｜>"),
+            ]
+        elif student_family == "qwen" and teacher_family == "llama":
+            # Qwen (student) -> LLaMA 3.x (teacher)
+            # Qwen format:  <|im_start|>{role}\n{content}<|im_end|>\n
+            # LLaMA format: <|begin_of_text|><|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>
+            #
+            # NOTE: this is newly added and not yet validated end-to-end (no LLaMA teacher
+            # checkpoint was available to test against). Before trusting it for real training,
+            # inspect a few sequences via OPD_DUMP_DIR / tools/opd_inspect_tokenizer_pair.py and
+            # confirm the reconstructed teacher_text round-trips to the same conversation as
+            # student_text.
+            return [
+                # Mid-conversation turns are preceded by the prior turn's "<|im_end|>\n" - match
+                # those compound patterns FIRST so the bare "<|im_start|>{role}\n" rules below can
+                # only match what's left over: the true first turn (which needs <|begin_of_text|>
+                # prepended, mirroring LLaMA's own format).
+                ("<|im_end|>\n<|im_start|>system\n", "<|eot_id|><|start_header_id|>system<|end_header_id|>\n\n"),
+                ("<|im_end|>\n<|im_start|>user\n", "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"),
+                ("<|im_end|>\n<|im_start|>assistant\n", "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"),
+                # First-turn (leftover, not preceded by "<|im_end|>\n"):
+                ("<|im_start|>system\n", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"),
+                ("<|im_start|>user\n", "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"),
+                ("<|im_start|>assistant\n", "<|begin_of_text|><|start_header_id|>assistant<|end_header_id|>\n\n"),
+                # Any remaining turn-close marker (e.g. the trailing generation-stop token).
+                ("<|im_end|>\n", "<|eot_id|>"),
+                ("<|im_end|>", "<|eot_id|>"),
+                ("<|endoftext|>", "<|end_of_text|>"),
             ]
         elif student_family == "qwen" and teacher_family == "qwen":
             # Qwen (student) -> Qwen (teacher): same chat template format,
@@ -308,6 +336,7 @@ class TeacherClient:
             elif student_family == "qwen":
                 # Qwen->Qwen: no mapping, text unchanged, no trailing \n issue.
                 # Qwen->DeepSeek: <|im_end|>\n -> <｜end▁of▁sentence｜> already clean.
+                # Qwen->LLaMA: <|im_end|>\n -> <|eot_id|> already clean (no trailing \n added).
                 pass
             elif student_family == "deepseek":
                 # DeepSeek->DeepSeek: same chat template format, no conversion,
@@ -809,7 +838,11 @@ class TeacherClient:
             else:
                 teacher_chunk_ids_padded.fill_(-1.0)
 
-            batch_size = attention_mask.size(0)
+            # NOTE: named distinctly from the outer `batch_size` (get_teacher_knowledge scope) -
+            # reusing that name here would make Python treat `batch_size` as local to this whole
+            # nested function (handle_futures), which breaks the retry loop above: it reads
+            # `batch_size` before this line ever runs, raising UnboundLocalError on any retry.
+            local_batch_size = attention_mask.size(0)
 
             # ---- Dump control ----
             global _dump_step_counter
@@ -817,7 +850,7 @@ class TeacherClient:
             if should_dump:
                 current_dump_step = _dump_step_counter
                 _dump_step_counter += 1
-                dump_num = min(OPD_DUMP_NUM_SEQS, batch_size)
+                dump_num = min(OPD_DUMP_NUM_SEQS, local_batch_size)
             else:
                 dump_num = 0
 
@@ -827,7 +860,7 @@ class TeacherClient:
                 # so we shift right by 1: fill [1:] logprobs into positions [1:].
                 # This way position j holds the logprob predicting token j,
                 # and core_algos can use [-R:] directly (no -1 offset).
-                for i in range(batch_size):
+                for i in range(local_batch_size):
                     valid_pos = attention_mask[i].nonzero(as_tuple=True)[0]
                     logps = teacher_topk_logps[i][:, 0]  # [N], predicts token 1..N
                     # logps[0] predicts token 1, fill at valid_pos[1]
@@ -898,10 +931,13 @@ class TeacherClient:
                 teacher_resp_marker = "<|im_start|>assistant\n"
             elif teacher_family == "deepseek":
                 teacher_resp_marker = "<｜Assistant｜>"
+            elif teacher_family == "llama":
+                # LLaMA: ...assistant<|end_header_id|>\n\n{response}
+                teacher_resp_marker = "<|end_header_id|>\n\n"
             else:
                 raise NotImplementedError(f"Unsupported teacher model family: {teacher_family}")
 
-            for i in range(batch_size):
+            for i in range(local_batch_size):
                 student_ids = input_ids[i]  # list[int], student prompt+response
                 teacher_ids = responses[i].tolist()  # list[int], teacher prompt+response+1 generated token
                 teacher_logps = teacher_topk_logps[i][:, 0]  # [teacher_seq_len - 1], top-1 logprob
@@ -983,6 +1019,11 @@ class TeacherClient:
                 elif teacher_family == "deepseek":
                     # DeepSeek uses <｜end▁of▁sentence｜> as eos (already added above via eos_token_id)
                     pass
+                elif teacher_family == "llama":
+                    # LLaMA 3.x uses <|eot_id|> (128009) as end-of-turn, distinct from eos
+                    eot_id = teacher_tokenizer.convert_tokens_to_ids("<|eot_id|>")
+                    if isinstance(eot_id, int) and eot_id != teacher_tokenizer.unk_token_id:
+                        teacher_special_end_ids.add(eot_id)
                 teacher_resp_end_tok = len(teacher_ids_no_gen)
                 while teacher_resp_end_tok > teacher_resp_start_tok and teacher_ids_no_gen[teacher_resp_end_tok - 1] in teacher_special_end_ids:
                     teacher_resp_end_tok -= 1
