@@ -32,8 +32,10 @@ wait_server_ready() {
     done
 }
 
-ps -ef | grep "python proxy.py" | grep -v grep | awk -F ' ' '{print $2}' | xargs -r kill -9
-ps -ef | grep "python worker.py" | grep -v grep | awk -F ' ' '{print $2}' | xargs -r kill -9
+pkill -f "python3 proxy.py" || true
+pkill -f "python proxy.py" || true
+pkill -f "python3 worker.py" || true
+pkill -f "python worker.py" || true
 
 nohup python3 proxy.py &> proxy.log &
 
