@@ -34,7 +34,11 @@ def main() -> None:
     for idx, (prompt, answer) in enumerate(EXAMPLES * args.repeat):
         rows.append(
             {
-                "prompt": prompt,
+                # verl's RLHFDataset._build_messages() does `messages = example.pop(prompt_key)`
+                # and expects a list of chat-message dicts (see examples/data_preprocess/gsm8k.py),
+                # not a bare string - apply_chat_template() silently drops a bare string's content
+                # instead of raising, which used to leave validation prompts with no user turn.
+                "prompt": [{"role": "user", "content": prompt}],
                 "data_source": "openai/gsm8k",
                 "reward_model": {"style": "rule", "ground_truth": answer},
                 "extra_info": {"split": "smoke", "index": idx},
