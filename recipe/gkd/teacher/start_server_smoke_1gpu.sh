@@ -24,7 +24,7 @@ wait_server_ready() {
     port=$3
     while true; do
         echo "wait ${server} server ready at ${ip}:${port}..."
-        result=$(echo -e "\n" | telnet "${ip}" "${port}" 2> /dev/null | grep Connected | wc -l)
+        result=$((echo -e "\n" | telnet "${ip}" "${port}" 2> /dev/null | grep Connected | wc -l) || true)
         if [ "${result}" -eq 1 ]; then
             break
         fi
