@@ -77,6 +77,10 @@ if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
     python3 examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
 fi
 
+if [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
+    ray status >/dev/null 2>&1 || ray start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+fi
+
 python3 -m verl.trainer.main_ppo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
@@ -99,6 +103,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.policy_loss.opd_loss_max_clamp=${opd_loss_max_clamp} \
     actor_rollout_ref.model.use_remove_padding=True \
     +actor_rollout_ref.model.override_config.max_position_embeddings=512 \
+    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
