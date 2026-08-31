@@ -9,15 +9,15 @@ from pathlib import Path
 import pandas as pd
 
 
-PROMPTS = [
-    "What is 1+1? Answer briefly.",
-    "Solve: 3 + 5 =",
-    "Write one sentence about gravity.",
-    "Answer briefly: what is water?",
-    "What color is the daytime sky on a clear day?",
-    "Complete the sequence: 2, 4, 6,",
-    "Give one reason people use umbrellas.",
-    "Translate to English: bonjour.",
+EXAMPLES = [
+    ("What is 1+1? Give the final answer in the form #### number.", "2"),
+    ("Solve: 3 + 5. Give the final answer in the form #### number.", "8"),
+    ("There are 4 apples and 2 more are added. How many apples are there? Give the final answer in the form #### number.", "6"),
+    ("A box has 10 pencils. If 3 are removed, how many remain? Give the final answer in the form #### number.", "7"),
+    ("What is 2 times 6? Give the final answer in the form #### number.", "12"),
+    ("What is 15 minus 9? Give the final answer in the form #### number.", "6"),
+    ("If each bag has 3 cookies and there are 4 bags, how many cookies are there? Give the final answer in the form #### number.", "12"),
+    ("Complete the sequence 2, 4, 6, 8. What is the next number? Give the final answer in the form #### number.", "10"),
 ]
 
 
@@ -30,7 +30,18 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.DataFrame({"prompt": PROMPTS * args.repeat})
+    rows = []
+    for idx, (prompt, answer) in enumerate(EXAMPLES * args.repeat):
+        rows.append(
+            {
+                "prompt": prompt,
+                "data_source": "openai/gsm8k",
+                "reward_model": {"style": "rule", "ground_truth": answer},
+                "extra_info": {"split": "smoke", "index": idx},
+            }
+        )
+
+    df = pd.DataFrame(rows)
     train_path = output_dir / "train.parquet"
     val_path = output_dir / "val.parquet"
     df.to_parquet(train_path)
