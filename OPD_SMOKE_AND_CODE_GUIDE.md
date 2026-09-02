@@ -440,6 +440,19 @@ PY
 
 ## Main Code Path
 
+For a small engineering demo of the same flow without Ray/vLLM/FSDP, see:
+
+```bash
+python3 playground/mini_verl_opd_flow.py
+```
+
+Read:
+
+```text
+playground/README.md
+playground/mini_verl_opd_flow.py
+```
+
 ### 1. Bash Entry
 
 File:
@@ -722,6 +735,71 @@ examples/data_preprocess/create_opd_smoke_data.py
 ```
 
 now creates GSM8K-like validation rows with `reward_model.ground_truth`.
+
+## Smoke vs Real Training (`cross_distill.sh`)
+
+`cross_distill_smoke_1gpu.sh` is a shrunk-down version of the real training
+script, `cross_distill.sh` (1 GPU / 5 steps / batch size 1, vs. 16 GPUs / 500
+steps / batch size 128). Full diff, with which differences actually change
+what the model learns vs. which are pure scale/plumbing:
+
+| Param | Smoke | Real (`cross_distill.sh`) | Effect |
+|---|---|---|---|
+| `train_prompt_bsz` / `ppo_mini_batch_size` | 1 | 128 | **Accuracy-relevant** - see below |
+| `total_training_steps` / `total_epochs` | 5 / 1 | 500 / 10 | **Accuracy-relevant** - the lever for "did distillation actually happen" |
+| `max_response_length` | 128 | 16384 | **Accuracy-relevant** - caps how long the student is allowed to reason |
+| `val_kwargs.max_tokens` | 128 | 31744 | **Accuracy-relevant** - same cap, applied at validation |
+| `optim.lr_warmup_steps` | 1 | 10 | Minor training-stability knob |
+| `data.max_prompt_length` | 256 | 1024 | Accuracy-relevant only if real prompts are long |
+| `TEACHER_MAX_SEQ_LEN` | 512 | 30720 | Must scale with response length or the teacher truncates |
+| `val_kwargs.n` | 1 | 4 | Statistical reliability of the *reported* accuracy, not the model itself |
+| `NNODES`/`NGPUS_PER_NODE` | 1/1 | 2/8 | Pure scale, no accuracy effect |
+| `sp_size`, `gen_tp`, `fsdp_size` | 1, 1, 1 | 2, 2, 8 | Pure parallelism/memory, no accuracy effect |
+| `gpu_memory_utilization` | 0.25 | 0.90 | Pure memory budget for vLLM KV cache |
+| `actor_ppo_max_token_len`/`infer_ppo_max_token_len`/`max_num_batched_tokens` | hardcoded small | computed from prompt+response length | Dynamic-batching token budget, no accuracy effect (just needs to be >= your longest sequence) |
+| `test_freq`/`save_freq` | 5/5 | 25/500 | Logging/checkpoint cadence only |
+| `logger` | console | console+wandb | Tracking only |
+| `attn_implementation=sdpa` override | present | absent (uses model default, presumably flash-attn) | Speed/memory, numerically near-identical, not an accuracy difference |
+| auto-generate data / auto-start Ray | present | absent | Convenience for iterating locally; real run assumes data + cluster already exist |
+
+Notes on the accuracy-relevant ones:
+
+- **`total_training_steps`/`total_epochs` is the big one.** Every other
+  parameter being "correct" doesn't matter if the model only takes 5 gradient
+  steps - that's a plumbing check, not a learning signal. 500 steps x 10
+  epochs is what's actually intended to pull the student's distribution
+  toward the teacher's.
+- **`max_response_length`/`val_kwargs.max_tokens` matters a lot for
+  GSM8K-style scoring specifically**, because the scorer (`gsm8k.py`,
+  `method="strict"`) requires the literal `#### number` at the end of the
+  response. If the cap is too small, a response gets truncated before it
+  reaches that marker and scores 0 - not because the model is wrong, but
+  because generation never got to finish. Too-short a cap manufactures
+  artificially low accuracy independent of how well distillation is working.
+- **`train_prompt_bsz`/`ppo_mini_batch_size` matters for gradient/reward
+  noise, but with a catch:** both scripts set `ppo_mini_batch_size` equal to
+  `train_prompt_bsz` (1==1 in smoke, 128==128 in real). That means even the
+  500-step real config still does exactly one gradient step per rollout
+  batch - no split into multiple mini-batches (and presumably a single PPO
+  epoch, since `ppo_epochs` isn't overridden either). So `actor/ppo_kl` and
+  `actor/pg_clipfrac` will be trivially `0.0` in the real run too, for the
+  same structural reason as the smoke test: the ratio never gets a chance to
+  move away from 1 within an update. To make PPO's clipping/KL bookkeeping
+  meaningful at scale, set `ppo_mini_batch_size < train_prompt_bsz` (e.g. 32
+  instead of 128) and/or `ppo_epochs > 1` - as written, that mechanism is
+  inert in both configs.
+- Everything else in the table (GPU/node count, `sp_size`/`gen_tp`/`fsdp_size`,
+  `gpu_memory_utilization`, the token-length-budget knobs, `test_freq`/
+  `save_freq`, `logger`) is scale and infrastructure, not learning dynamics -
+  it determines how fast the run goes and whether it fits in memory, not what
+  the model ends up learning. Getting these "wrong" typically means an OOM or
+  a slow run, not a silently different trained model.
+
+If the goal is still "does this model pair run end to end," keep the
+smoke-scale numbers. The moment the goal is "is the student getting closer to
+the teacher," bump `total_training_steps`/`total_epochs`,
+`max_response_length`/`val_kwargs.max_tokens`, and `train_prompt_bsz` first -
+roughly in that order of impact.
 
 ## Next Steps After Smoke
 

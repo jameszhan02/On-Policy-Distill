@@ -14,7 +14,6 @@ set -xeuo pipefail
 # checkpoint. They can be HuggingFace model IDs or local checkpoint paths.
 
 project_name="ON_POLICY_DISTILL"
-exp_name="OPD_SMOKE_1GPU"
 
 adv_estimator="opd"
 
@@ -42,6 +41,15 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${PWD}/data"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
+
+# exp_name (and therefore CKPTS_DIR/resume_mode=auto below) is derived from the
+# student/teacher model paths so that switching model pairs gets its own checkpoint
+# dir instead of silently resuming from a previous, unrelated pair's checkpoint.
+# Override EXP_NAME directly if you want a fixed name regardless of model paths.
+student_tag=$(basename "${MODEL_PATH}")
+teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
+exp_name=${EXP_NAME:-"OPD_SMOKE_1GPU_${student_tag}_to_${teacher_tag}"}
+
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/smoke/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/smoke/val.parquet"}
