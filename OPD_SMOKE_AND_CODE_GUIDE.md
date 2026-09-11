@@ -172,8 +172,29 @@ pkill -f "worker.py"
 pkill -f "VLLM::EngineCore"
 ```
 
-Be careful with `pkill -f "VLLM::EngineCore"` on shared servers if other jobs
-from the same user are running vLLM.
+Verify it actually stopped:
+
+```bash
+ps -ef | grep -E "proxy.py|worker.py|VLLM::EngineCore" | grep -v grep
+ss -ltn | grep -E '15555|15556'
+```
+Both should come back empty.
+
+`cs-tai-srv02` is a **shared server** — `pkill -f "VLLM::EngineCore"` matches by
+process name only, not by owner, so it can kill another user's vLLM job too.
+Scope it to yourself, or kill specific PIDs instead:
+
+```bash
+pkill -u "$(whoami)" -f "VLLM::EngineCore"     # only your own processes
+# or:
+ps -ef | grep VLLM::EngineCore | grep -v grep  # find the PID(s) that are yours
+kill -9 <pid>
+```
+
+You don't need to `ray stop` between teacher restarts — the student training
+script auto-starts Ray only if it isn't already running, so leaving Ray up
+across teacher stop/start cycles is fine and saves a re-init. See "Stop Ray"
+below for when you do want to tear the whole thing down.
 
 ## Teacher Parameters
 
@@ -656,7 +677,74 @@ Fix:
 ray start --head --num-gpus=1 --include-dashboard=false
 ```
 
-The smoke script now auto-starts Ray by default.
+The smoke script now auto-starts Ray by default. `ray stop`/`ray start`/`ray
+status` are machine-scoped, not directory-scoped — run them from anywhere,
+as long as you're in a shell with `.venv` activated.
+
+### Ray Connects To A Stale/Dead Cluster Address
+
+Error:
+
+```text
+Failed to connect to the default Ray cluster address at <ip>:6379. This is
+most likely due to a previous Ray instance that has since crashed.
+...
+ConnectionError: Failed to connect to Ray cluster at <ip>:6379
+```
+
+Cause: the smoke script's auto-start check is
+`ray status >/dev/null 2>&1 || ray start --head ...`. `ray status` can find a
+**stale local address record** from a previous Ray head that has since died
+(crashed, killed, or — on a shared server — possibly another session
+entirely) and report that as fine, so the script skips starting a fresh
+head. Then `ray.init(address="auto")` inside `main_ppo.py` tries to actually
+connect to that dead address and fails after its retry timeout.
+
+Fix — Ray's own error message tells you exactly what to do:
+
+```bash
+ray stop
+ray start --head --num-gpus=1 --include-dashboard=false
+ray status   # confirm it now shows a live, local cluster
+```
+
+Then re-run training. On a shared server, also sanity-check the cluster you
+just started is actually yours, not colliding with another user's (Ray's
+default temp dir `/tmp/ray` and default GCS port `6379` aren't user-scoped):
+
+```bash
+ps -ef -o user,pid,cmd | grep -E "raylet|gcs_server" | grep -v grep
+```
+
+### `ray status` Shows No GPU Under `Total Usage`
+
+Symptom: `ray status` runs and shows an active node with no errors, but the
+`Total Usage:` section is empty — no `CPU`/`GPU`/`memory` lines at all,
+instead of something like `0.0/1.0 GPU`. Ray is "up" but has zero resources
+registered, so it can never actually schedule the rollout/training work.
+
+Get a definitive answer (more reliable than eyeballing `ray status`):
+
+```bash
+python3 -c "import ray; ray.init(address='auto'); print(ray.cluster_resources())"
+```
+If `GPU` isn't a key in the printed dict, this is confirmed.
+
+Two likely causes:
+
+1. Ray was started without `--num-gpus=1` (autodetection can fail silently
+   on some setups). Fix:
+   ```bash
+   ray stop
+   ray start --head --num-gpus=1 --include-dashboard=false
+   ray status   # should now show "0.0/1.0 GPU" under Total Usage
+   ```
+2. `CUDA_VISIBLE_DEVICES` was empty/unset in the shell that ran `ray start`:
+   ```bash
+   echo $CUDA_VISIBLE_DEVICES
+   nvidia-smi                    # sanity check the GPU is visible from this shell
+   unset CUDA_VISIBLE_DEVICES    # if it was set to an empty string
+   ```
 
 ### Qwen2Tokenizer Missing `all_special_tokens_extended`
 
@@ -735,6 +823,100 @@ examples/data_preprocess/create_opd_smoke_data.py
 ```
 
 now creates GSM8K-like validation rows with `reward_model.ground_truth`.
+
+### `wait proxy server ready...` Loop Never Ends
+
+Symptom: `start_server_smoke_1gpu.sh` prints `wait proxy server ready at
+localhost:15556...` forever and never reaches `teacher proxy is ready`.
+
+Old cause (fixed 2026-09-11): `wait_server_ready()` used to shell out to
+`telnet`, which is not installed by default on many minimal Linux images.
+When `telnet` is missing, the command silently fails (its "not found" error
+goes through the same `2> /dev/null` meant for its own stderr), `grep`/`wc -l`
+see empty input, and the readiness check reports "not ready" forever — even
+if `proxy.py` started and bound its ports just fine within the first second.
+`start_server_smoke_1gpu.sh` now checks readiness with bash's built-in
+`/dev/tcp/<host>/<port>` instead, so it no longer depends on an external
+`telnet` binary.
+
+If you still see this loop with the current script, it means the check is
+now telling the truth: nothing is actually listening. Check
+`recipe/gkd/teacher/proxy.log` immediately (don't wait) — see the next entry
+and "Where To Find Logs" below.
+
+### `ModuleNotFoundError: No module named 'zmq'` In `proxy.log`
+
+Cause: `proxy.py`'s `import zmq` (from the `pyzmq` package) ran under a
+Python interpreter that doesn't have `pyzmq` installed — almost always
+because `.venv` wasn't activated in the shell/tmux pane you launched the
+teacher script from. Activation is per-shell-session state; it does not
+persist across new panes/SSH logins, and activating a different project's
+venv in the same shell fully deactivates this one first (it's a switch, not
+a stack) — you need to re-`source` it every time you come back.
+
+Fix:
+
+```bash
+source /data/shengzhan/On-Policy-Distill/.venv/bin/activate
+which python3                                  # should be inside .venv/bin/
+python3 -c "import zmq; print(zmq.__file__)"   # should succeed standalone
+```
+
+If `python3` really is `.venv/bin/python3` and `import zmq` still fails,
+`pyzmq` itself is missing from that venv — install it directly:
+
+```bash
+pip install pyzmq==27.1.0
+```
+
+`requirements.txt` also lists a second, unrelated package named `zmq==0.0.0`
+(a PyPI name-squat/placeholder package, not the real ZeroMQ bindings — the
+real one is `pyzmq`, which provides the importable `zmq` module). Having
+both listed is a `requirements.txt` mistake, not something you need to fix
+to unblock training, but if reinstalling `pyzmq` alone doesn't resolve the
+import, rule out clobbering with:
+
+```bash
+pip uninstall zmq -y
+pip install --force-reinstall pyzmq==27.1.0
+```
+
+## Where To Find Logs
+
+Nothing here writes to one central log file — check the piece you care about:
+
+- **Teacher proxy**: `recipe/gkd/teacher/proxy.log` — ZMQ proxy startup /
+  errors (`"proxy is running..."` on success).
+- **Teacher worker**: `recipe/gkd/teacher/worker.log` — vLLM engine load,
+  KV cache sizing, request handling. Both are written relative to wherever
+  you `cd`'d before running `start_server_smoke_1gpu.sh`.
+- **Student training console**: the smoke config sets
+  `trainer.logger='["console"]'`, and `cross_distill_smoke_1gpu.sh` runs
+  `main_ppo` in the foreground — training metrics/progress only print to
+  your terminal's stdout, nothing is saved unless you redirect it yourself:
+  ```bash
+  bash cross_distill_smoke_1gpu.sh 2>&1 | tee train_run.log
+  ```
+- **Hydra's own log + resolved config**: auto-created relative to wherever
+  you launched `main_ppo` from (repo root, for the smoke script):
+  ```text
+  outputs/<date>/<time>/main_ppo.log        # logger.info()-level messages
+  outputs/<date>/<time>/.hydra/config.yaml  # fully-resolved config actually used
+  outputs/<date>/<time>/.hydra/overrides.yaml
+  ```
+- **Ray's internal logs**: `/tmp/ray/session_latest/logs/` — per-actor/worker
+  stdout+stderr, `raylet.err`, `gcs_server.err`. Check here first if an actor
+  dies silently or gets OOM-killed without a clean Python traceback reaching
+  your terminal.
+- **OPD alignment dumps** (not logs, but same "where did it go" category):
+  `/tmp/opd_dumps/` (`OPD_DUMP_DIR`) — teacher/student token alignment
+  artifacts, see "Cross-Tokenizer Work" above.
+
+Quick way to watch the teacher side live while iterating:
+
+```bash
+tail -f recipe/gkd/teacher/proxy.log recipe/gkd/teacher/worker.log
+```
 
 ## Smoke vs Real Training (`cross_distill.sh`)
 
