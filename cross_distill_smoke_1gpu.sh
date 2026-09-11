@@ -133,6 +133,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=1 \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \
+    actor_rollout_ref.actor.optim.optimizer=AdamW8bit \
+    actor_rollout_ref.actor.optim.optimizer_impl=bitsandbytes.optim \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
