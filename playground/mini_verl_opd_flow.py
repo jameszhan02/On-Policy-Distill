@@ -3,7 +3,6 @@
 
 This is an engineering demo, not a faithful large-model trainer. It keeps the
 same component boundaries as the repo:
-
 Dataset -> RolloutWorker -> OPDRewardManager -> TeacherClient -> Advantage
 -> ActorWorker.update_actor -> Checkpoint
 
@@ -87,7 +86,7 @@ class SmokeDataset:
         ]
 
     def __iter__(self):
-        for row_id, row in enumerate(self.rows):
+        for row_id, row in enumerate(self.rows): # for idx purpose
             yield DataProto(
                 batch={"prompts": [row["prompt"]]},
                 non_tensor_batch={
@@ -102,7 +101,7 @@ class RolloutWorker:
     """Student rollout worker.
 
     Real call:
-        `actor_rollout_wg.generate_sequences()`
+        # `actor_rollout_wg.generate_sequences()`
 
     Real implementation area:
         `verl/workers/rollout/vllm_rollout/`

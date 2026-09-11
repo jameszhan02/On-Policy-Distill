@@ -27,8 +27,12 @@ wait_server_ready() {
     port=$3
     while true; do
         echo "wait ${server} server ready at ${ip}:${port}..."
-        result=$((echo -e "\n" | telnet "${ip}" "${port}" 2> /dev/null | grep Connected | wc -l) || true)
-        if [ "${result}" -eq 1 ]; then
+        # Portable TCP check via bash's built-in /dev/tcp pseudo-device,
+        # instead of shelling out to `telnet` (often not installed on
+        # minimal images, which made this loop hang forever regardless
+        # of whether the server was actually up).
+        if (exec 3<>"/dev/tcp/${ip}/${port}") 2>/dev/null; then
+            exec 3>&- 3<&- 2>/dev/null || true
             break
         fi
         sleep 1
