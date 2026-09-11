@@ -61,6 +61,11 @@ export TEACHER_CKPT_PATH
 export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"512"}
 export HYDRA_FULL_ERROR=1
 
+# Reduce CUDA allocator fragmentation when the teacher (a separate process,
+# often already resident on the same GPU) and this training process each run
+# their own PyTorch/vLLM allocator.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True"}
+
 export OPD_DUMP_DIR=${OPD_DUMP_DIR:-"/tmp/opd_dumps"}
 export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
 export OPD_DUMP_MAX_STEPS=${OPD_DUMP_MAX_STEPS:-"3"}
@@ -136,7 +141,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.nccl_timeout=72000 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=512 \

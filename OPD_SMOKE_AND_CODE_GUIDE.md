@@ -134,10 +134,10 @@ source .venv/bin/activate
 
 cd recipe/gkd/teacher
 
-TEACHER_CKPT_PATH=/data/shared_ckpt/opd_smoke/Qwen2.5-0.5B-Instruct \
-TEACHER_GPU_MEMORY_UTILIZATION=0.12 \
-TEACHER_MAX_MODEL_LEN=256 \
-TEACHER_MAX_NUM_BATCHED_TOKENS=256 \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+TEACHER_GPU_MEMORY_UTILIZATION=0.15 \
+TEACHER_MAX_MODEL_LEN=512 \
+TEACHER_MAX_NUM_BATCHED_TOKENS=512 \
 TEACHER_ENFORCE_EAGER=0 \
 bash start_server_smoke_1gpu.sh
 ```
@@ -178,6 +178,7 @@ Verify it actually stopped:
 ps -ef | grep -E "proxy.py|worker.py|VLLM::EngineCore" | grep -v grep
 ss -ltn | grep -E '15555|15556'
 ```
+
 Both should come back empty.
 
 `cs-tai-srv02` is a **shared server** — `pkill -f "VLLM::EngineCore"` matches by
@@ -649,7 +650,7 @@ Qwen -> Qwen
 DeepSeek -> DeepSeek
 ```
 
-Note: LLaMA had only ever been wired up as a *student* family (chat-template mapping,
+Note: LLaMA had only ever been wired up as a _student_ family (chat-template mapping,
 response-marker detection, and end-of-turn token stripping are three separate branch
 points in `verl/workers/reward_manager/opd.py`). Adding a new "X -> LLaMA (teacher)"
 pair means checking all three, not just `_build_chat_template_mapping()`.
@@ -728,6 +729,7 @@ Get a definitive answer (more reliable than eyeballing `ray status`):
 ```bash
 python3 -c "import ray; ray.init(address='auto'); print(ray.cluster_resources())"
 ```
+
 If `GPU` isn't a key in the printed dict, this is confirmed.
 
 Two likely causes:
@@ -925,24 +927,24 @@ script, `cross_distill.sh` (1 GPU / 5 steps / batch size 1, vs. 16 GPUs / 500
 steps / batch size 128). Full diff, with which differences actually change
 what the model learns vs. which are pure scale/plumbing:
 
-| Param | Smoke | Real (`cross_distill.sh`) | Effect |
-|---|---|---|---|
-| `train_prompt_bsz` / `ppo_mini_batch_size` | 1 | 128 | **Accuracy-relevant** - see below |
-| `total_training_steps` / `total_epochs` | 5 / 1 | 500 / 10 | **Accuracy-relevant** - the lever for "did distillation actually happen" |
-| `max_response_length` | 128 | 16384 | **Accuracy-relevant** - caps how long the student is allowed to reason |
-| `val_kwargs.max_tokens` | 128 | 31744 | **Accuracy-relevant** - same cap, applied at validation |
-| `optim.lr_warmup_steps` | 1 | 10 | Minor training-stability knob |
-| `data.max_prompt_length` | 256 | 1024 | Accuracy-relevant only if real prompts are long |
-| `TEACHER_MAX_SEQ_LEN` | 512 | 30720 | Must scale with response length or the teacher truncates |
-| `val_kwargs.n` | 1 | 4 | Statistical reliability of the *reported* accuracy, not the model itself |
-| `NNODES`/`NGPUS_PER_NODE` | 1/1 | 2/8 | Pure scale, no accuracy effect |
-| `sp_size`, `gen_tp`, `fsdp_size` | 1, 1, 1 | 2, 2, 8 | Pure parallelism/memory, no accuracy effect |
-| `gpu_memory_utilization` | 0.25 | 0.90 | Pure memory budget for vLLM KV cache |
-| `actor_ppo_max_token_len`/`infer_ppo_max_token_len`/`max_num_batched_tokens` | hardcoded small | computed from prompt+response length | Dynamic-batching token budget, no accuracy effect (just needs to be >= your longest sequence) |
-| `test_freq`/`save_freq` | 5/5 | 25/500 | Logging/checkpoint cadence only |
-| `logger` | console | console+wandb | Tracking only |
-| `attn_implementation=sdpa` override | present | absent (uses model default, presumably flash-attn) | Speed/memory, numerically near-identical, not an accuracy difference |
-| auto-generate data / auto-start Ray | present | absent | Convenience for iterating locally; real run assumes data + cluster already exist |
+| Param                                                                        | Smoke           | Real (`cross_distill.sh`)                          | Effect                                                                                        |
+| ---------------------------------------------------------------------------- | --------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `train_prompt_bsz` / `ppo_mini_batch_size`                                   | 1               | 128                                                | **Accuracy-relevant** - see below                                                             |
+| `total_training_steps` / `total_epochs`                                      | 5 / 1           | 500 / 10                                           | **Accuracy-relevant** - the lever for "did distillation actually happen"                      |
+| `max_response_length`                                                        | 128             | 16384                                              | **Accuracy-relevant** - caps how long the student is allowed to reason                        |
+| `val_kwargs.max_tokens`                                                      | 128             | 31744                                              | **Accuracy-relevant** - same cap, applied at validation                                       |
+| `optim.lr_warmup_steps`                                                      | 1               | 10                                                 | Minor training-stability knob                                                                 |
+| `data.max_prompt_length`                                                     | 256             | 1024                                               | Accuracy-relevant only if real prompts are long                                               |
+| `TEACHER_MAX_SEQ_LEN`                                                        | 512             | 30720                                              | Must scale with response length or the teacher truncates                                      |
+| `val_kwargs.n`                                                               | 1               | 4                                                  | Statistical reliability of the _reported_ accuracy, not the model itself                      |
+| `NNODES`/`NGPUS_PER_NODE`                                                    | 1/1             | 2/8                                                | Pure scale, no accuracy effect                                                                |
+| `sp_size`, `gen_tp`, `fsdp_size`                                             | 1, 1, 1         | 2, 2, 8                                            | Pure parallelism/memory, no accuracy effect                                                   |
+| `gpu_memory_utilization`                                                     | 0.25            | 0.90                                               | Pure memory budget for vLLM KV cache                                                          |
+| `actor_ppo_max_token_len`/`infer_ppo_max_token_len`/`max_num_batched_tokens` | hardcoded small | computed from prompt+response length               | Dynamic-batching token budget, no accuracy effect (just needs to be >= your longest sequence) |
+| `test_freq`/`save_freq`                                                      | 5/5             | 25/500                                             | Logging/checkpoint cadence only                                                               |
+| `logger`                                                                     | console         | console+wandb                                      | Tracking only                                                                                 |
+| `attn_implementation=sdpa` override                                          | present         | absent (uses model default, presumably flash-attn) | Speed/memory, numerically near-identical, not an accuracy difference                          |
+| auto-generate data / auto-start Ray                                          | present         | absent                                             | Convenience for iterating locally; real run assumes data + cluster already exist              |
 
 Notes on the accuracy-relevant ones:
 
