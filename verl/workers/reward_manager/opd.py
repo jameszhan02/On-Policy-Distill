@@ -344,13 +344,27 @@ class TeacherClient:
                 pass
 
             new_input_id = self.tokenizer(teacher_text, add_special_tokens=False)['input_ids']
-            if self.max_seq_len and len(new_input_id) > self.max_seq_len:
+            if self.max_seq_len:
+                # The teacher API generates at least one token so that vLLM returns
+                # prompt log-probabilities.  Keep that generation token inside the
+                # configured sequence budget; truncating to max_seq_len itself would
+                # make bg_task send max_tokens=0 and abort the whole training run.
+                reserved_generation_tokens = max(int(self.max_tokens), 1)
+                max_input_len = self.max_seq_len - reserved_generation_tokens
+                if max_input_len < 1:
+                    raise ValueError(
+                        f"max_seq_len ({self.max_seq_len}) must be greater than the "
+                        f"reserved teacher generation tokens ({reserved_generation_tokens})"
+                    )
+
+            if self.max_seq_len and len(new_input_id) > max_input_len:
                 warnings.warn(
                     f"[retokenize] seq {seq_idx}: teacher tokens ({len(new_input_id)}) exceed "
-                    f"max_seq_len ({self.max_seq_len}), will skip gradient for this sequence. "
+                    f"max input length ({max_input_len}; max_seq_len={self.max_seq_len}), "
+                    f"will skip gradient for this sequence. "
                     f"Student tokens: {len(batch[seq_idx])}, inflation ratio: {len(new_input_id)/len(batch[seq_idx]):.2f}x"
                 )
-                new_input_id = new_input_id[:self.max_seq_len]
+                new_input_id = new_input_id[:max_input_len]
             input_id_list.append(new_input_id)
 
         return input_id_list
@@ -660,7 +674,24 @@ class TeacherClient:
 
                 batch = self.retokenize_batch(batch)
                 if self.max_seq_len:
-                    max_tokens = [min(self.max_tokens, self.max_seq_len - len(prompt)) for prompt in batch]
+                    # retokenize_batch applies this limit for cross-tokenizer
+                    # requests. Apply it again here as a safety net for the
+                    # same-tokenizer fast path, which returns before retokenization.
+                    reserved_generation_tokens = max(int(self.max_tokens), 1)
+                    max_input_len = self.max_seq_len - reserved_generation_tokens
+                    if max_input_len < 1:
+                        raise ValueError(
+                            f"max_seq_len ({self.max_seq_len}) must be greater than the "
+                            f"reserved teacher generation tokens ({reserved_generation_tokens})"
+                        )
+                    batch = [prompt[:max_input_len] for prompt in batch]
+                    max_tokens = [
+                        min(reserved_generation_tokens, self.max_seq_len - len(prompt))
+                        for prompt in batch
+                    ]
+                    assert all(value >= 1 for value in max_tokens), (
+                        f"Teacher request must reserve at least one generation token, got {max_tokens}"
+                    )
                     request = {"prompt_token_ids": batch, "max_tokens": max_tokens}
                 else:
                     request = {"prompt_token_ids": batch, "max_tokens": self.max_tokens}
