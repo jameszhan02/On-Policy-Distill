@@ -35,6 +35,11 @@ train_prompt_bsz=4
 n_resp_per_prompt=1
 train_prompt_mini_bsz=2
 
+# total_training_steps is the hard stop. Keep the epoch ceiling high enough
+# that the trainer's outer epoch loop cannot end the run before step 5000.
+total_epochs=${TOTAL_EPOCHS:-10}
+total_training_steps=${TOTAL_TRAINING_STEPS:-5000}
+
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
 
@@ -171,8 +176,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.test_freq=1000 \
     trainer.save_freq=1000 \
-    trainer.total_epochs=1 \
-    trainer.total_training_steps=5000 \
+    trainer.total_epochs=${total_epochs} \
+    trainer.total_training_steps=${total_training_steps} \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     trainer.log_val_generations=1
