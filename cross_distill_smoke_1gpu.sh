@@ -27,7 +27,7 @@ clip_ratio_high=0.28
 opd_loss_max_clamp=10.0
 
 max_prompt_length=256
-max_response_length=128
+max_response_length=512
 
 loss_agg_mode="token-mean"
 
@@ -58,7 +58,7 @@ export TEACHER_SERVER_IP=${TEACHER_SERVER_IP:-"127.0.0.1"}
 export TEACHER_SERVER_PORT=${TEACHER_SERVER_PORT:-"15555"}
 export TEACHER_N_WORKERS=${TEACHER_N_WORKERS:-"1"}
 export TEACHER_CKPT_PATH
-export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"512"}
+export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"768"}
 export HYDRA_FULL_ERROR=1
 
 # Reduce CUDA allocator fragmentation when the teacher (a separate process,
@@ -117,7 +117,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     actor_rollout_ref.actor.policy_loss.opd_loss_max_clamp=${opd_loss_max_clamp} \
     actor_rollout_ref.model.use_remove_padding=True \
-    +actor_rollout_ref.model.override_config.max_position_embeddings=512 \
+    +actor_rollout_ref.model.override_config.max_position_embeddings=768 \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -146,7 +146,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=512 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=768 \
     actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
@@ -156,7 +156,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.top_k=${val_top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.val_kwargs.max_tokens=128 \
+    actor_rollout_ref.rollout.val_kwargs.max_tokens=512 \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
