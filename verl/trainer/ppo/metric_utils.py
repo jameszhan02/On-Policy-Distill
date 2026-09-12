@@ -116,10 +116,6 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     if token_level_rewards.shape[-1] % 2 == 0 and token_level_rewards.shape[-1] // 2 >= max_response_length:
         token_level_rewards = token_level_rewards[:, : token_level_rewards.shape[-1] // 2]
 
-    sequence_score = token_level_scores.sum(-1)
-    sequence_reward = token_level_rewards.sum(-1)
-
-    # Per-sample mean of token-level scores (average logp per token)
     prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = batch.batch["response_mask"].bool()
 
@@ -129,17 +125,28 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     prompt_length = response_info["prompt_length"]
     response_length = response_info["response_length"]
 
+    # OPD's teacher tensor may cover the full prompt + response sequence (the
+    # same-tokenizer fast path) or contain infinite sentinels for response
+    # positions that alignment deliberately skipped. Metrics should describe
+    # only non-sentinel, trainable response tokens. NaNs remain visible so a
+    # genuine numerical failure is not hidden by metric aggregation.
+    response_token_scores = token_level_scores[:, -response_mask.shape[-1]:]
+    response_token_rewards = token_level_rewards[:, -response_mask.shape[-1]:]
+    score_mask = response_mask & (~torch.isinf(response_token_scores))
+    reward_mask = response_mask & (~torch.isinf(response_token_rewards))
+    sequence_score = torch.where(score_mask, response_token_scores, 0.0).sum(-1)
+    sequence_reward = torch.where(reward_mask, response_token_rewards, 0.0).sum(-1)
+
     aborted_mask = (response_length == 0).bool()
     non_aborted_mask = ~aborted_mask
 
     non_aborted_sequence_score = sequence_score[non_aborted_mask]
     non_aborted_sequence_reward = sequence_reward[non_aborted_mask]
 
-    # Compute per-sample mean token-level score (mean logp per token per sample)
-    # Use response_mask to only average over valid response tokens
-    response_token_counts = response_mask.sum(-1).float().clamp(min=1)  # avoid div by 0
-    token_scores_masked = token_level_scores[:, -response_mask.shape[-1]:] * response_mask
-    per_sample_mean_score = token_scores_masked.sum(-1) / response_token_counts
+    # Normalize by non-sentinel teacher-scored response positions so this metric is
+    # comparable across response lengths and alignment skip rates.
+    score_token_counts = score_mask.sum(-1).float().clamp(min=1)
+    per_sample_mean_score = sequence_score / score_token_counts
     non_aborted_per_sample_mean_score = per_sample_mean_score[non_aborted_mask]
 
     mean_score_mean = torch.mean(non_aborted_per_sample_mean_score).detach().item()

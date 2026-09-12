@@ -17,10 +17,138 @@ A Ray logger will receive logging info from different processes.
 
 import datetime
 import logging
+import math
 import numbers
 import pprint
 
 import torch
+
+
+_METRIC_DESCRIPTIONS = {
+    "actor/pg_loss": "OPD policy loss used for backprop",
+    "actor/entropy": "student token-distribution entropy",
+    "actor/grad_norm": "gradient norm before clipping",
+    "actor/lr": "actor learning rate",
+    "actor/ppo_kl": "current-vs-old policy KL proxy",
+    "actor/pg_clipfrac": "fraction clipped by PPO bound",
+    "actor/pg_clipfrac_lower": "fraction clipped by lower dual bound",
+    "actor/opd_inf_tokens": "teacher/alignment tokens skipped by OPD",
+    "actor/opd_inf_ratio": "fraction of OPD response tokens skipped",
+    "critic/score/mean": "teacher response log-prob sum; length-dependent",
+    "critic/mean_token_score/mean": "teacher response log-prob per valid token",
+    "critic/advantages/mean": "raw teacher signal before OPD loss transform",
+    "response_length/mean": "mean generated response tokens",
+    "response_length/clip_ratio": "fraction reaching response-length limit",
+    "response/aborted_ratio": "fraction of empty or aborted responses",
+    "perf/throughput": "processed prompt + response tokens per second",
+    "perf/max_memory_allocated_gb": "peak GPU memory actively allocated",
+    "perf/max_memory_reserved_gb": "peak GPU memory reserved by allocator",
+    "perf/cpu_memory_used_gb": "host memory used by trainer process",
+    "timing_s/step": "end-to-end seconds for this training step",
+}
+
+
+_SECTION_RULES = (
+    ("Optimization", ("actor/",)),
+    ("Teacher / OPD signal", ("critic/",)),
+    ("Sequence lengths", ("response_length/", "response_length_non_aborted/", "response/", "prompt_length/")),
+    ("Performance", ("perf/",)),
+    ("Timing (seconds)", ("timing_s/",)),
+    ("Timing per token", ("timing_per_token_ms/",)),
+    ("Validation", ("val-", "val/", "test/")),
+)
+
+
+def _format_metric_value(value):
+    """Format scalar metrics compactly while retaining useful precision."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, numbers.Integral):
+        return f"{int(value)}"
+    if isinstance(value, numbers.Real):
+        value = float(value)
+        if value == 0:
+            return "0"
+        if not math.isfinite(value):
+            return str(value)
+        magnitude = abs(value)
+        if magnitude >= 1_000_000 or magnitude < 1e-4:
+            return f"{value:.3e}"
+        if magnitude >= 1_000:
+            return f"{value:,.1f}"
+        return f"{value:.6g}"
+    return pprint.pformat(value)
+
+
+def _metric_section(key):
+    for section, prefixes in _SECTION_RULES:
+        if key.startswith(prefixes):
+            return section
+    return "Other metrics"
+
+
+def format_metrics_table(data: dict, step) -> str:
+    """Render scalar trainer metrics as compact, grouped console tables.
+
+    Structured logging backends still receive the original metric dictionary;
+    this function changes console presentation only.
+    """
+    scalar_metrics = {key: value for key, value in data.items() if isinstance(value, numbers.Number)}
+    epoch = scalar_metrics.pop("training/epoch", None)
+    logged_step = scalar_metrics.pop("training/global_step", step)
+    title = f"Training step {int(logged_step)}"
+    if epoch is not None:
+        title += f" | epoch {_format_metric_value(epoch)}"
+
+    grouped = {}
+    for key, value in scalar_metrics.items():
+        grouped.setdefault(_metric_section(key), []).append((key, value))
+
+    lines = ["", f"=== {title} ==="]
+    section_order = [section for section, _ in _SECTION_RULES] + ["Other metrics"]
+    for section in section_order:
+        rows = grouped.get(section)
+        if not rows:
+            continue
+        rows.sort(key=lambda item: item[0])
+        rendered = [
+            (key, _format_metric_value(value), _METRIC_DESCRIPTIONS.get(key, "")) for key, value in rows
+        ]
+        metric_width = max(len("Metric"), *(len(row[0]) for row in rendered))
+        value_width = max(len("Value"), *(len(row[1]) for row in rendered))
+        meaning_width = 52
+        separator = f"+-{'-' * metric_width}-+-{'-' * value_width}-+-{'-' * meaning_width}-+"
+        lines.extend(
+            [
+                "",
+                f"[{section}]",
+                separator,
+                f"| {'Metric':<{metric_width}} | {'Value':>{value_width}} | {'Meaning':<{meaning_width}} |",
+                separator,
+            ]
+        )
+        for metric, value, meaning in rendered:
+            lines.append(
+                f"| {metric:<{metric_width}} | {value:>{value_width}} | "
+                f"{meaning[:meaning_width]:<{meaning_width}} |"
+            )
+        lines.append(separator)
+
+    alerts = []
+    response_clip_ratio = scalar_metrics.get("response_length/clip_ratio")
+    if isinstance(response_clip_ratio, numbers.Real) and response_clip_ratio >= 0.25:
+        alerts.append(
+            f"response clipping is {float(response_clip_ratio):.1%}; generations are frequently hitting the token limit"
+        )
+    opd_inf_ratio = scalar_metrics.get("actor/opd_inf_ratio")
+    if isinstance(opd_inf_ratio, numbers.Real) and opd_inf_ratio >= 0.05:
+        alerts.append(f"OPD skipped-token ratio is {float(opd_inf_ratio):.1%}; inspect tokenizer alignment")
+    aborted_ratio = scalar_metrics.get("response/aborted_ratio")
+    if isinstance(aborted_ratio, numbers.Real) and aborted_ratio > 0:
+        alerts.append(f"aborted-response ratio is {float(aborted_ratio):.1%}")
+    if alerts:
+        lines.extend(["", "[Attention]", *(f"! {alert}" for alert in alerts)])
+    return "\n".join(lines)
 
 
 def concat_dict_to_str(dict: dict, step):
@@ -48,7 +176,7 @@ class LocalLogger:
 
     def log(self, data, step):
         if self.print_to_console:
-            print(concat_dict_to_str(data, step=step), flush=True)
+            print(format_metrics_table(data, step=step), flush=True)
 
 
 class DecoratorLoggerBase:
