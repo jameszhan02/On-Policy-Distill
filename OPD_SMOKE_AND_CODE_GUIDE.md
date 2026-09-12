@@ -348,6 +348,128 @@ Notes:
 - `test_freq=5` runs validation at step 5.
 - `save_freq=5` saves checkpoint at step 5.
 
+## Training On Real GSM8K (Instead Of The 16-Prompt Smoke Set)
+
+Generate the real dataset (needs internet access from the training box):
+
+```bash
+mkdir -p data/gsm8k
+python3 examples/data_preprocess/gsm8k.py --local_save_dir data/gsm8k
+```
+
+This downloads/caches `openai/gsm8k` from HF Hub and writes:
+
+```text
+data/gsm8k/train.parquet   # 7,473 rows
+data/gsm8k/test.parquet    # 1,319 rows
+```
+in the same schema `cross_distill_smoke_1gpu.sh` already expects — no other
+script changes needed. `mkdir -p` first: `to_parquet()` does not create the
+output directory itself and fails with `FileNotFoundError` if it's missing.
+
+If the training box has no internet access, or you already have this data
+(or a variant of it) elsewhere as raw `{"question": ..., "answer": ...}`
+JSONL (the un-preprocessed HF `openai/gsm8k` shape), convert it directly
+instead of downloading:
+
+```bash
+python3 - <<'PY'
+import json
+import re
+import pandas as pd
+
+def extract_solution(solution_str):
+    solution = re.search(r"#### (\-?[0-9\.\,]+)", solution_str)
+    assert solution is not None, f"no #### marker in: {solution_str!r}"
+    return solution.group(0).split("#### ")[1].replace(",", "")
+
+instruction_following = 'Let\'s think step by step and output the final answer after "####".'
+
+def convert(jsonl_path, out_parquet_path, split):
+    rows = []
+    with open(jsonl_path) as f:
+        for idx, line in enumerate(f):
+            ex = json.loads(line)
+            question_raw = ex["question"]
+            answer_raw = ex["answer"]
+            rows.append({
+                "data_source": "openai/gsm8k",
+                "prompt": [{"role": "user", "content": question_raw + " " + instruction_following}],
+                "ability": "math",
+                "reward_model": {"style": "rule", "ground_truth": extract_solution(answer_raw)},
+                "extra_info": {"split": split, "index": idx, "answer": answer_raw, "question": question_raw},
+            })
+    df = pd.DataFrame(rows)
+    df.to_parquet(out_parquet_path)
+    print(f"wrote {len(df)} rows -> {out_parquet_path}")
+
+# EDIT THESE FOUR PATHS to match your source jsonl / this repo's data dir:
+convert("/path/to/train.jsonl", "data/gsm8k/train.parquet", "train")
+convert("/path/to/test.jsonl",  "data/gsm8k/test.parquet",  "test")
+PY
+```
+This mirrors `examples/data_preprocess/gsm8k.py`'s exact extraction/schema
+logic (`extract_solution()`'s regex, the `prompt`/`data_source`/
+`reward_model`/`extra_info` shape), just reading from a local JSONL file
+instead of going through `datasets.load_dataset(...)`.
+
+Point training at the real data — `TRAIN_FILE`/`TEST_FILE` are already
+env-overridable, no script edit needed for this part:
+
+```bash
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/test.parquet \
+MODEL_PATH=<your student checkpoint> \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+bash cross_distill_smoke_1gpu.sh
+```
+
+### Setting Total Steps For A Real Run
+
+The smoke defaults (`total_epochs=1` + `total_training_steps=5`) are fine for
+the 16-prompt plumbing check, much too short to see any real learning on
+7,473 real rows. Edit `cross_distill_smoke_1gpu.sh` directly near the bottom.
+Two options:
+
+**A. Go by epochs (auto-derives steps):** delete the
+`trainer.total_training_steps=5 \` line entirely, keep only:
+```bash
+    trainer.total_epochs=<N> \
+```
+Per `verl/trainer/ppo/ray_trainer.py`: `total_training_steps` defaults to
+`None`, and when it is `None` the trainer computes
+`total_training_steps = len(train_dataloader) * total_epochs` itself — i.e.
+exactly `N` full passes over the training file. If `trainer.total_training_steps`
+is explicitly set to anything, it silently overrides this and hard-caps the
+run there regardless of `total_epochs` — this is why leaving the line in at
+`5` caps every run at 5 steps no matter how high `total_epochs` is set.
+
+**B. Cap at an exact step count** (for a shorter first checkpoint, not a full
+epoch):
+```bash
+    trainer.total_epochs=1 \
+    trainer.total_training_steps=1000 \
+```
+`total_epochs=1` just needs to stay big enough that its own natural cap
+(`len(train_dataloader)` steps) doesn't cut the run off before your
+`total_training_steps` value is reached.
+
+Picking a number — from an observed real run at `train_prompt_bsz=1`,
+`timing_s/step ≈ 3.7-3.9s`:
+
+| Target | Approx. wall-clock |
+|---|---|
+| 1,000 steps (Option B, first "does accuracy move" checkpoint) | ~1 hour |
+| 1 full epoch = 7,473 steps (Option A, `total_epochs=1`) | ~8 hours |
+| 3 full epochs | ~24 hours |
+
+Start with a short Option B run (~1000 steps) first and check whether
+`val-core/openai/gsm8k/acc/mean@1` moves off `0.0`, before committing to a
+multi-hour full-epoch run. Also bump `max_response_length`/
+`val_kwargs.max_tokens` up from the smoke default of `128` once on real
+data — real GSM8K reasoning chains need more room, or responses keep getting
+truncated before the `#### number` marker regardless of step count.
+
 ## Expected Successful Output
 
 Training logs should reach:
