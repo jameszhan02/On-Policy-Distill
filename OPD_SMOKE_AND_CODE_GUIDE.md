@@ -837,6 +837,14 @@ ray start --head --num-gpus=1 --include-dashboard=false
 ray status   # confirm it now shows a live, local cluster
 ```
 
+```python
+python3 - <<'PY'
+import pandas as pd
+df = pd.read_parquet("data/gsm8k/test.parquet")
+df.sample(n=150, random_state=42).to_parquet("data/gsm8k/val_small.parquet")
+PY
+```
+
 Then re-run training. On a shared server, also sanity-check the cluster you
 just started is actually yours, not colliding with another user's (Ray's
 default temp dir `/tmp/ray` and default GCS port `6379` aren't user-scoped):
