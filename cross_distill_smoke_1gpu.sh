@@ -169,7 +169,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=False \
-    trainer.test_freq=250 \
+    trainer.test_freq=1000 \
     trainer.save_freq=1000 \
     trainer.total_epochs=1 \
     trainer.total_training_steps=5000 \
