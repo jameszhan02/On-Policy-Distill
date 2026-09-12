@@ -363,6 +363,7 @@ This downloads/caches `openai/gsm8k` from HF Hub and writes:
 data/gsm8k/train.parquet   # 7,473 rows
 data/gsm8k/test.parquet    # 1,319 rows
 ```
+
 in the same schema `cross_distill_smoke_1gpu.sh` already expects — no other
 script changes needed. `mkdir -p` first: `to_parquet()` does not create the
 output directory itself and fails with `FileNotFoundError` if it's missing.
@@ -408,6 +409,7 @@ convert("/path/to/train.jsonl", "data/gsm8k/train.parquet", "train")
 convert("/path/to/test.jsonl",  "data/gsm8k/test.parquet",  "test")
 PY
 ```
+
 This mirrors `examples/data_preprocess/gsm8k.py`'s exact extraction/schema
 logic (`extract_solution()`'s regex, the `prompt`/`data_source`/
 `reward_model`/`extra_info` shape), just reading from a local JSONL file
@@ -419,7 +421,7 @@ env-overridable, no script edit needed for this part:
 ```bash
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
 TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/test.parquet \
-MODEL_PATH=<your student checkpoint> \
+MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```
@@ -433,9 +435,11 @@ Two options:
 
 **A. Go by epochs (auto-derives steps):** delete the
 `trainer.total_training_steps=5 \` line entirely, keep only:
+
 ```bash
     trainer.total_epochs=<N> \
 ```
+
 Per `verl/trainer/ppo/ray_trainer.py`: `total_training_steps` defaults to
 `None`, and when it is `None` the trainer computes
 `total_training_steps = len(train_dataloader) * total_epochs` itself — i.e.
@@ -446,10 +450,12 @@ run there regardless of `total_epochs` — this is why leaving the line in at
 
 **B. Cap at an exact step count** (for a shorter first checkpoint, not a full
 epoch):
+
 ```bash
     trainer.total_epochs=1 \
     trainer.total_training_steps=1000 \
 ```
+
 `total_epochs=1` just needs to stay big enough that its own natural cap
 (`len(train_dataloader)` steps) doesn't cut the run off before your
 `total_training_steps` value is reached.
@@ -457,11 +463,11 @@ epoch):
 Picking a number — from an observed real run at `train_prompt_bsz=1`,
 `timing_s/step ≈ 3.7-3.9s`:
 
-| Target | Approx. wall-clock |
-|---|---|
-| 1,000 steps (Option B, first "does accuracy move" checkpoint) | ~1 hour |
-| 1 full epoch = 7,473 steps (Option A, `total_epochs=1`) | ~8 hours |
-| 3 full epochs | ~24 hours |
+| Target                                                        | Approx. wall-clock |
+| ------------------------------------------------------------- | ------------------ |
+| 1,000 steps (Option B, first "does accuracy move" checkpoint) | ~1 hour            |
+| 1 full epoch = 7,473 steps (Option A, `total_epochs=1`)       | ~8 hours           |
+| 3 full epochs                                                 | ~24 hours          |
 
 Start with a short Option B run (~1000 steps) first and check whether
 `val-core/openai/gsm8k/acc/mean@1` moves off `0.0`, before committing to a

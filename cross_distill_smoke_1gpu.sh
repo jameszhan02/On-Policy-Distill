@@ -31,9 +31,9 @@ max_response_length=512
 
 loss_agg_mode="token-mean"
 
-train_prompt_bsz=1
+train_prompt_bsz=4
 n_resp_per_prompt=1
-train_prompt_mini_bsz=1
+train_prompt_mini_bsz=2
 
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
@@ -80,8 +80,8 @@ val_temperature=0.6
 
 sp_size=1
 use_dynamic_bsz=True
-actor_ppo_max_token_len=512
-infer_ppo_max_token_len=512
+actor_ppo_max_token_len=768
+infer_ppo_max_token_len=768
 offload=True
 gen_tp=1
 fsdp_size=1
