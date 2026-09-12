@@ -58,7 +58,7 @@ export TEACHER_SERVER_IP=${TEACHER_SERVER_IP:-"127.0.0.1"}
 export TEACHER_SERVER_PORT=${TEACHER_SERVER_PORT:-"15555"}
 export TEACHER_N_WORKERS=${TEACHER_N_WORKERS:-"1"}
 export TEACHER_CKPT_PATH
-export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"768"}
+export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"1024"}
 export HYDRA_FULL_ERROR=1
 
 # Reduce CUDA allocator fragmentation when the teacher (a separate process,
