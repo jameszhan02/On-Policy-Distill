@@ -161,7 +161,7 @@ ray status   # confirm it now shows a live, local cluster
 
 ```bash
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
-TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/test.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small.parquet \
 MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
@@ -182,6 +182,20 @@ Available KV cache memory: ...
 Supported_tasks: ['generate']
 worker started...
 ```
+
+```bash 
+  MODEL_PATH="/data/shared_ckpt/Llama-3.2-1B-Instruct" \
+  SFT_FORMAT_LOSS_MODE=format \
+  SFT_TRAIN_SAMPLES=256 \
+  SFT_VAL_SAMPLES=64 \
+  SFT_MAX_LENGTH=768 \
+  SFT_LR=5e-6 \
+  SFT_EPOCHS=1 \
+  SFT_OUTPUT_DIR="/data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span" \
+  bash format_sft_gsm8k_1gpu.sh
+```
+
+##  /data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span/global_step_32/huggingface
 
 Check processes:
 

@@ -5,6 +5,21 @@ set -euo pipefail
 # All reasoning stays in context, while loss is applied only to the exact
 # `#### <number>` answer span and the terminating special token.
 
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "${REPO_ROOT}"
+
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+    if [[ -x "${REPO_ROOT}/.venv/bin/python3" ]]; then
+        PYTHON_BIN="${REPO_ROOT}/.venv/bin/python3"
+    else
+        PYTHON_BIN=$(command -v python3 || true)
+    fi
+fi
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+    echo "No Python executable found. Set PYTHON_BIN or create ${REPO_ROOT}/.venv." >&2
+    exit 1
+fi
+
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${PWD}/data"}
 MODEL_PATH=${MODEL_PATH:-"meta-llama/Llama-3.2-1B-Instruct"}
 
@@ -43,11 +58,12 @@ fi
 
 if [[ ! -f "${SFT_TRAIN_FILE}" || ! -f "${SFT_VAL_FILE}" ]]; then
     echo "GSM8K parquet files not found; preparing them in ${SFT_DATA_DIR}"
-    python3 examples/data_preprocess/gsm8k.py --local_save_dir "${SFT_DATA_DIR}"
+    "${PYTHON_BIN}" examples/data_preprocess/gsm8k.py --local_save_dir "${SFT_DATA_DIR}"
 fi
 
 echo
 echo "=== GSM8K format SFT ==="
+echo "Python:           ${PYTHON_BIN}"
 echo "Base model:       ${MODEL_PATH}"
 echo "Train data:       ${SFT_TRAIN_FILE}"
 echo "Train samples:    ${SFT_TRAIN_SAMPLES}"
@@ -63,7 +79,7 @@ echo "Epochs:           ${SFT_EPOCHS}"
 echo "Output directory: ${SFT_OUTPUT_DIR}"
 echo
 
-torchrun --standalone --nnodes=1 --nproc-per-node=1 \
+"${PYTHON_BIN}" -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=1 \
     -m verl.trainer.fsdp_sft_trainer \
     data.train_files="${SFT_TRAIN_FILE}" \
     data.val_files="${SFT_VAL_FILE}" \
