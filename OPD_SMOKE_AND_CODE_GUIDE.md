@@ -542,51 +542,92 @@ format.
 
 ## Convert FSDP Checkpoint To HuggingFace
 
-For the current smoke script, backend is FSDP, so use:
+The saved `global_step_*/actor` directory is a verl/FSDP checkpoint. Convert it
+to a standard Hugging Face full-weight directory with the repository's built-in
+model merger:
 
 ```bash
 cd /data/shengzhan/On-Policy-Distill
 source .venv/bin/activate
 
+RUN_DIR=data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU_Llama-3.2-1B-Instruct_to_opd_teacher
+export STEP=5000
+
+# data/shengzhan/On-Policy-Distill/data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU_Llama-3.2-1B-Instruct_to_opd_teacher/global_step_3000/actor_hf_merged
+
 python3 -m verl.model_merger merge \
   --backend fsdp \
-  --local_dir data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU/global_step_5/actor \
-  --target_dir data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU/global_step_5/actor_hf_merged \
-  --trust-remote-code
+  --local_dir "${RUN_DIR}/global_step_${STEP}/actor" \
+  --target_dir "${RUN_DIR}/global_step_${STEP}/actor_hf_merged"
 ```
 
-After merge, check:
+Set `STEP` to the checkpoint to convert. For example, to convert step 2000:
 
 ```bash
-find data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU/global_step_5/actor_hf_merged -maxdepth 1 -type f | sort
+export STEP=2000
+
+python3 -m verl.model_merger merge \
+  --backend fsdp \
+  --local_dir "${RUN_DIR}/global_step_${STEP}/actor" \
+  --target_dir "${RUN_DIR}/global_step_${STEP}/actor_hf_merged"
 ```
 
-You want to see model weights, usually:
+Check the converted Hugging Face directory:
+
+```bash
+find "${RUN_DIR}/global_step_${STEP}/actor_hf_merged" \
+  -maxdepth 1 -type f -printf '%f\n' | sort
+```
+
+Expected files include `config.json`, tokenizer files, and either one weight
+file:
 
 ```text
 model.safetensors
 ```
 
-or sharded weights:
+or standard Hugging Face weight shards:
 
 ```text
-model-00001-of-000xx.safetensors
+model-00001-of-00002.safetensors
+model-00002-of-00002.safetensors
 model.safetensors.index.json
 ```
 
-Test HF loading:
+Verify the converted model with Transformers:
 
 ```bash
 python3 - <<'PY'
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
 
-path = "data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU/global_step_5/actor_hf_merged"
-tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, device_map="cpu")
-print(type(tok).__name__)
-print(type(model).__name__)
+run_dir = "data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU_Llama-3.2-1B-Instruct_to_opd_teacher"
+step = os.environ.get("STEP", "5000")
+path = f"{run_dir}/global_step_{step}/actor_hf_merged"
+
+tokenizer = AutoTokenizer.from_pretrained(path)
+model = AutoModelForCausalLM.from_pretrained(
+    path,
+    torch_dtype="auto",
+    low_cpu_mem_usage=True,
+)
+
+print("model:", type(model).__name__)
+print("parameters:", f"{model.num_parameters():,}")
+print("tokenizer size:", len(tokenizer))
+print("HF merge/load: OK")
 PY
 ```
+
+The usable Hugging Face model is now in:
+
+```text
+${RUN_DIR}/global_step_${STEP}/actor_hf_merged
+```
+
+If a model requires custom Hugging Face code, append `--trust-remote-code` to
+the merge command. Do not delete the original `actor/` checkpoint until the
+converted model passes the load test.
 
 ## Main Code Path
 

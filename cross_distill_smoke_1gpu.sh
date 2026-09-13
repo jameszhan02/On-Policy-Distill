@@ -24,7 +24,7 @@ kl_loss_coef=0.0
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
-opd_loss_max_clamp=10.0
+opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-2.0}
 
 max_prompt_length=256
 max_response_length=512
@@ -35,10 +35,15 @@ train_prompt_bsz=4
 n_resp_per_prompt=1
 train_prompt_mini_bsz=2
 
-# total_training_steps is the hard stop. Keep the epoch ceiling high enough
-# that the trainer's outer epoch loop cannot end the run before step 5000.
+# Debug defaults: run a short, observable experiment before committing to a
+# full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-5000}
+total_training_steps=${TOTAL_TRAINING_STEPS:-300}
+test_freq=${TEST_FREQ:-50}
+save_freq=${SAVE_FREQ:-50}
+val_before_train=${VAL_BEFORE_TRAIN:-True}
+actor_lr=${ACTOR_LR:-2e-7}
+actor_lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS:-50}
 
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
@@ -53,11 +58,13 @@ TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Override EXP_NAME directly if you want a fixed name regardless of model paths.
 student_tag=$(basename "${MODEL_PATH}")
 teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
-exp_name=${EXP_NAME:-"OPD_SMOKE_1GPU_${student_tag}_to_${teacher_tag}"}
+exp_name=${EXP_NAME:-"OPD_DEBUG_1GPU_${student_tag}_to_${teacher_tag}"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/smoke/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/smoke/val.parquet"}
+ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-"${CKPTS_DIR}/rollouts"}
+VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-"${CKPTS_DIR}/validation"}
 
 export TEACHER_SERVER_IP=${TEACHER_SERVER_IP:-"127.0.0.1"}
 export TEACHER_SERVER_PORT=${TEACHER_SERVER_PORT:-"15555"}
@@ -79,9 +86,9 @@ temperature=1.0
 top_p=1.0
 top_k=-1
 
-val_top_p=0.95
-val_top_k=20
-val_temperature=0.6
+val_top_p=1.0
+val_top_k=-1
+val_temperature=0.0
 
 sp_size=1
 use_dynamic_bsz=True
@@ -135,8 +142,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.mode=sync \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=1 \
+    actor_rollout_ref.actor.optim.lr=${actor_lr} \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=${actor_lr_warmup_steps} \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \
     actor_rollout_ref.actor.optim.optimizer=AdamW8bit \
     actor_rollout_ref.actor.optim.optimizer_impl=bitsandbytes.optim \
@@ -159,7 +166,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.temperature=${val_temperature} \
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${val_top_k} \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=False \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.max_tokens=512 \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
@@ -173,11 +180,13 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
     trainer.nnodes="${NNODES}" \
-    trainer.val_before_train=False \
-    trainer.test_freq=1000 \
-    trainer.save_freq=1000 \
+    trainer.val_before_train=${val_before_train} \
+    trainer.test_freq=${test_freq} \
+    trainer.save_freq=${save_freq} \
     trainer.total_epochs=${total_epochs} \
     trainer.total_training_steps=${total_training_steps} \
     trainer.default_local_dir="${CKPTS_DIR}" \
+    trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}" \
+    trainer.validation_data_dir="${VALIDATION_DATA_DIR}" \
     trainer.resume_mode=auto \
     trainer.log_val_generations=1
