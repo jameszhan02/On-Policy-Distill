@@ -22,6 +22,11 @@ SFT_MAX_LENGTH=${SFT_MAX_LENGTH:-896}
 SFT_LR=${SFT_LR:-5e-6}
 SFT_EPOCHS=${SFT_EPOCHS:-1}
 SFT_SEED=${SFT_SEED:-44}
+SFT_MODEL_DTYPE=${SFT_MODEL_DTYPE:-bf16}
+SFT_OPTIMIZER=${SFT_OPTIMIZER:-AdamW8bit}
+SFT_OPTIMIZER_IMPL=${SFT_OPTIMIZER_IMPL:-bitsandbytes.optim}
+
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True"}
 
 if (( SFT_TRAIN_BATCH_SIZE % SFT_MICRO_BATCH_SIZE != 0 )); then
     echo "SFT_TRAIN_BATCH_SIZE must be divisible by SFT_MICRO_BATCH_SIZE" >&2
@@ -42,6 +47,8 @@ echo "Global batch:     ${SFT_TRAIN_BATCH_SIZE}"
 echo "Micro batch:      ${SFT_MICRO_BATCH_SIZE}"
 echo "Max length:       ${SFT_MAX_LENGTH}"
 echo "Learning rate:    ${SFT_LR}"
+echo "Model dtype:      ${SFT_MODEL_DTYPE}"
+echo "Optimizer:        ${SFT_OPTIMIZER} (${SFT_OPTIMIZER_IMPL})"
 echo "Epochs:           ${SFT_EPOCHS}"
 echo "Output directory: ${SFT_OUTPUT_DIR}"
 echo
@@ -63,10 +70,13 @@ torchrun --standalone --nnodes=1 --nproc-per-node=1 \
     data.max_length="${SFT_MAX_LENGTH}" \
     data.truncation=left \
     optim.lr="${SFT_LR}" \
+    optim.optimizer="${SFT_OPTIMIZER}" \
+    optim.optimizer_impl="${SFT_OPTIMIZER_IMPL}" \
     optim.lr_warmup_steps_ratio=0.1 \
     optim.weight_decay=0.01 \
     optim.clip_grad=1.0 \
     model.partial_pretrain="${MODEL_PATH}" \
+    model.fsdp_config.model_dtype="${SFT_MODEL_DTYPE}" \
     model.enable_gradient_checkpointing=True \
     trainer.default_local_dir="${SFT_OUTPUT_DIR}" \
     trainer.project_name=ON_POLICY_DISTILL \
