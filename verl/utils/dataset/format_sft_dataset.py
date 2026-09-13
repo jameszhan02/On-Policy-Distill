@@ -33,7 +33,7 @@ class FormatSFTDataset(SFTDataset):
     def __init__(self, parquet_files, tokenizer, config, max_samples=-1):
         super().__init__(parquet_files, tokenizer, config, max_samples=max_samples)
         instruction = config.get("format_instruction", DEFAULT_FORMAT_INSTRUCTION)
-        self.format_loss_mode = str(config.get("format_loss_mode", "format")).lower()
+        self.format_loss_mode = str(config.get("format_loss_mode", "full")).lower()
         if self.format_loss_mode not in {"format", "full"}:
             raise ValueError("data.format_loss_mode must be 'format' or 'full'")
 

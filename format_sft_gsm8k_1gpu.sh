@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Short span-selective SFT warmup for reliable GSM8K answer formatting.
-# All reasoning stays in context, while loss is applied only to the exact
-# `#### <number>` answer span and the terminating special token.
+# Short, format-conditioned SFT warmup for reliable GSM8K answer formatting.
+# Standard full-response loss is the default because it both rewards the final
+# `#### <number>` line and penalizes incorrect intermediate format markers.
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${REPO_ROOT}"
@@ -24,7 +24,7 @@ RAY_DATA_HOME=${RAY_DATA_HOME:-"${PWD}/data"}
 MODEL_PATH=${MODEL_PATH:-"meta-llama/Llama-3.2-1B-Instruct"}
 
 model_tag=$(basename "${MODEL_PATH}")
-SFT_OUTPUT_DIR=${SFT_OUTPUT_DIR:-"${RAY_DATA_HOME}/format_sft_ckpts/${model_tag}_gsm8k_format_span"}
+SFT_OUTPUT_DIR=${SFT_OUTPUT_DIR:-"${RAY_DATA_HOME}/format_sft_ckpts/${model_tag}_gsm8k_format_full"}
 SFT_DATA_DIR=${SFT_DATA_DIR:-"${RAY_DATA_HOME}/gsm8k"}
 SFT_TRAIN_FILE=${SFT_TRAIN_FILE:-"${SFT_DATA_DIR}/train.parquet"}
 SFT_VAL_FILE=${SFT_VAL_FILE:-"${SFT_DATA_DIR}/test.parquet"}
@@ -37,7 +37,7 @@ SFT_MAX_LENGTH=${SFT_MAX_LENGTH:-896}
 SFT_LR=${SFT_LR:-5e-6}
 SFT_EPOCHS=${SFT_EPOCHS:-1}
 SFT_SEED=${SFT_SEED:-44}
-SFT_FORMAT_LOSS_MODE=${SFT_FORMAT_LOSS_MODE:-format}
+SFT_FORMAT_LOSS_MODE=${SFT_FORMAT_LOSS_MODE:-full}
 SFT_MODEL_DTYPE=${SFT_MODEL_DTYPE:-bf16}
 SFT_OPTIMIZER=${SFT_OPTIMIZER:-AdamW8bit}
 SFT_OPTIMIZER_IMPL=${SFT_OPTIMIZER_IMPL:-bitsandbytes.optim}

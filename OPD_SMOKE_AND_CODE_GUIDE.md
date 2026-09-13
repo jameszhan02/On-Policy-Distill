@@ -162,7 +162,7 @@ ray status   # confirm it now shows a live, local cluster
 ```bash
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
 TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small.parquet \
-MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
+MODEL_PATH=/data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span/global_step_32/huggingface \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```

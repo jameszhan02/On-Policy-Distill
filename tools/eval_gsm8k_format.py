@@ -22,6 +22,7 @@ STRICT_FORMAT_INSTRUCTION = (
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({NUMBER})[ \t]*\Z")
 LOOSE_ANSWER_RE = re.compile(rf"####\s*({NUMBER})")
+NUMBER_RE = re.compile(NUMBER)
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,23 +96,29 @@ def numbers_equal(left: str | None, right: str | None) -> bool:
 def classify_response(response: str, ground_truth: str | None) -> dict:
     stripped = response.strip()
     strict_match = STRICT_FINAL_RE.search(stripped)
-    loose_matches = LOOSE_ANSWER_RE.findall(stripped)
-    prediction = loose_matches[-1] if loose_matches else None
+    marker_count = stripped.count("####")
+    marker_tail = stripped.rsplit("####", maxsplit=1)[-1] if marker_count else ""
+    tail_numbers = NUMBER_RE.findall(marker_tail)
+    prediction = tail_numbers[-1] if tail_numbers else None
+    format_valid = strict_match is not None and marker_count == 1
 
-    if strict_match:
+    if marker_count > 1:
+        failure_type = "multiple_markers"
+    elif format_valid:
         failure_type = None
-    elif "####" not in stripped:
+    elif marker_count == 0:
         failure_type = "missing_marker"
-    elif not loose_matches:
+    elif not tail_numbers:
         failure_type = "missing_number_after_marker"
     else:
         failure_type = "trailing_or_nonfinal_text"
 
     return {
-        "format_valid": strict_match is not None,
+        "format_valid": format_valid,
+        "marker_count": marker_count,
         "prediction": prediction,
         "loose_correct": numbers_equal(prediction, ground_truth),
-        "strict_correct": strict_match is not None and numbers_equal(strict_match.group(1), ground_truth),
+        "strict_correct": format_valid and numbers_equal(strict_match.group(1), ground_truth),
         "failure_type": failure_type,
     }
 
@@ -188,7 +195,12 @@ def main() -> None:
 
     failure_counts = {
         name: sum(record["failure_type"] == name for record in records)
-        for name in ("missing_marker", "missing_number_after_marker", "trailing_or_nonfinal_text")
+        for name in (
+            "multiple_markers",
+            "missing_marker",
+            "missing_number_after_marker",
+            "trailing_or_nonfinal_text",
+        )
     }
     format_valid = sum(record["format_valid"] for record in records)
     loose_correct = sum(record["loose_correct"] for record in records)
