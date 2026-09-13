@@ -25,8 +25,10 @@ SFT_SEED=${SFT_SEED:-44}
 SFT_MODEL_DTYPE=${SFT_MODEL_DTYPE:-bf16}
 SFT_OPTIMIZER=${SFT_OPTIMIZER:-AdamW8bit}
 SFT_OPTIMIZER_IMPL=${SFT_OPTIMIZER_IMPL:-bitsandbytes.optim}
+SFT_FSDP_STRATEGY=${SFT_FSDP_STRATEGY:-fsdp}
 
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True"}
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 
 if (( SFT_TRAIN_BATCH_SIZE % SFT_MICRO_BATCH_SIZE != 0 )); then
     echo "SFT_TRAIN_BATCH_SIZE must be divisible by SFT_MICRO_BATCH_SIZE" >&2
@@ -49,6 +51,7 @@ echo "Max length:       ${SFT_MAX_LENGTH}"
 echo "Learning rate:    ${SFT_LR}"
 echo "Model dtype:      ${SFT_MODEL_DTYPE}"
 echo "Optimizer:        ${SFT_OPTIMIZER} (${SFT_OPTIMIZER_IMPL})"
+echo "FSDP strategy:    ${SFT_FSDP_STRATEGY}"
 echo "Epochs:           ${SFT_EPOCHS}"
 echo "Output directory: ${SFT_OUTPUT_DIR}"
 echo
@@ -76,6 +79,7 @@ torchrun --standalone --nnodes=1 --nproc-per-node=1 \
     optim.weight_decay=0.01 \
     optim.clip_grad=1.0 \
     model.partial_pretrain="${MODEL_PATH}" \
+    model.strategy="${SFT_FSDP_STRATEGY}" \
     model.fsdp_config.model_dtype="${SFT_MODEL_DTYPE}" \
     model.enable_gradient_checkpointing=True \
     trainer.default_local_dir="${SFT_OUTPUT_DIR}" \
