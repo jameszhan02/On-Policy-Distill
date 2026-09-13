@@ -159,6 +159,14 @@ ray start --head --num-gpus=1 --include-dashboard=false
 ray status   # confirm it now shows a live, local cluster
 ```
 
+```bash
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/test.parquet \
+MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+bash cross_distill_smoke_1gpu.sh
+```
+
 Watch logs:
 
 ```bash

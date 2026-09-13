@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Short full-weight SFT warmup for reliable GSM8K answer formatting.
-# The standard GSM8K solutions contain reasoning followed by `#### <answer>`,
-# so this teaches the format without replacing chain-of-thought with bare labels.
+# Short, suffix-focused SFT warmup for reliable GSM8K answer formatting.
+# Standard solutions remain intact, but only their final tokens contribute to
+# the loss so `#### <answer>` is not diluted by hundreds of reasoning tokens.
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${PWD}/data"}
 MODEL_PATH=${MODEL_PATH:-"meta-llama/Llama-3.2-1B-Instruct"}
 
 model_tag=$(basename "${MODEL_PATH}")
-SFT_OUTPUT_DIR=${SFT_OUTPUT_DIR:-"${RAY_DATA_HOME}/format_sft_ckpts/${model_tag}_gsm8k_format"}
+SFT_OUTPUT_DIR=${SFT_OUTPUT_DIR:-"${RAY_DATA_HOME}/format_sft_ckpts/${model_tag}_gsm8k_format_suffix"}
 SFT_DATA_DIR=${SFT_DATA_DIR:-"${RAY_DATA_HOME}/gsm8k"}
 SFT_TRAIN_FILE=${SFT_TRAIN_FILE:-"${SFT_DATA_DIR}/train.parquet"}
 SFT_VAL_FILE=${SFT_VAL_FILE:-"${SFT_DATA_DIR}/test.parquet"}
@@ -22,6 +22,7 @@ SFT_MAX_LENGTH=${SFT_MAX_LENGTH:-896}
 SFT_LR=${SFT_LR:-5e-6}
 SFT_EPOCHS=${SFT_EPOCHS:-1}
 SFT_SEED=${SFT_SEED:-44}
+SFT_SUFFIX_TOKENS=${SFT_SUFFIX_TOKENS:-16}
 SFT_MODEL_DTYPE=${SFT_MODEL_DTYPE:-bf16}
 SFT_OPTIMIZER=${SFT_OPTIMIZER:-AdamW8bit}
 SFT_OPTIMIZER_IMPL=${SFT_OPTIMIZER_IMPL:-bitsandbytes.optim}
@@ -49,6 +50,7 @@ echo "Global batch:     ${SFT_TRAIN_BATCH_SIZE}"
 echo "Micro batch:      ${SFT_MICRO_BATCH_SIZE}"
 echo "Max length:       ${SFT_MAX_LENGTH}"
 echo "Learning rate:    ${SFT_LR}"
+echo "Suffix tokens:    ${SFT_SUFFIX_TOKENS}"
 echo "Model dtype:      ${SFT_MODEL_DTYPE}"
 echo "Optimizer:        ${SFT_OPTIMIZER} (${SFT_OPTIMIZER_IMPL})"
 echo "FSDP strategy:    ${SFT_FSDP_STRATEGY}"
@@ -64,6 +66,9 @@ torchrun --standalone --nnodes=1 --nproc-per-node=1 \
     data.response_key=extra_info \
     'data.prompt_dict_keys=["question"]' \
     'data.response_dict_keys=["answer"]' \
+    data.custom_cls.path=pkg://verl.utils.dataset.format_sft_dataset \
+    data.custom_cls.name=FormatSFTDataset \
+    +data.format_suffix_tokens="${SFT_SUFFIX_TOKENS}" \
     data.train_max_samples="${SFT_TRAIN_SAMPLES}" \
     data.val_max_samples="${SFT_VAL_SAMPLES}" \
     +data.shuffle=True \
