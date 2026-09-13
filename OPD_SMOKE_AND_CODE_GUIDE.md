@@ -135,11 +135,28 @@ source .venv/bin/activate
 cd recipe/gkd/teacher
 
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
-TEACHER_GPU_MEMORY_UTILIZATION=0.19 \
+TEACHER_GPU_MEMORY_UTILIZATION=0.17 \
 TEACHER_MAX_MODEL_LEN=1024 \
 TEACHER_MAX_NUM_BATCHED_TOKENS=1024 \
 TEACHER_ENFORCE_EAGER=0 \
 bash start_server_smoke_1gpu.sh
+```
+
+```bash
+tail -f worker.log
+```
+
+```bash
+pkill -f "proxy.py"
+pkill -f "worker.py"
+pkill -f "VLLM::EngineCore"
+```
+
+
+```bash
+ray stop
+ray start --head --num-gpus=1 --include-dashboard=false
+ray status   # confirm it now shows a live, local cluster
 ```
 
 Watch logs:
@@ -166,11 +183,7 @@ ps -ef | grep -E "proxy.py|worker.py|VLLM::EngineCore" | grep -v grep
 
 Stop teacher service:
 
-```bash
-pkill -f "proxy.py"
-pkill -f "worker.py"
-pkill -f "VLLM::EngineCore"
-```
+
 
 Verify it actually stopped:
 

@@ -38,7 +38,7 @@ train_prompt_mini_bsz=2
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-300}
+total_training_steps=${TOTAL_TRAINING_STEPS:-5}
 test_freq=${TEST_FREQ:-50}
 save_freq=${SAVE_FREQ:-50}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
@@ -81,6 +81,12 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:T
 export OPD_DUMP_DIR=${OPD_DUMP_DIR:-"/tmp/opd_dumps"}
 export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
 export OPD_DUMP_MAX_STEPS=${OPD_DUMP_MAX_STEPS:-"3"}
+
+# Keep the terminal useful during debugging: show one student rollout and only
+# the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.
+export VERL_CONSOLE_LOG_MODE=${VERL_CONSOLE_LOG_MODE:-"debug"}
+export VERL_CONSOLE_ROLLOUT_SAMPLES=${VERL_CONSOLE_ROLLOUT_SAMPLES:-"1"}
+export VERL_CONSOLE_ROLLOUT_MAX_CHARS=${VERL_CONSOLE_ROLLOUT_MAX_CHARS:-"2000"}
 
 temperature=1.0
 top_p=1.0

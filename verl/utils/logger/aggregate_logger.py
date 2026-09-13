@@ -19,6 +19,7 @@ import datetime
 import logging
 import math
 import numbers
+import os
 import pprint
 
 import torch
@@ -59,6 +60,30 @@ _SECTION_RULES = (
 )
 
 
+# Deliberately small console view for interactive training diagnosis. Detailed
+# metrics are still sent unchanged to structured logging backends.
+_DEBUG_METRICS = (
+    ("actor/pg_loss", "OPD loss"),
+    ("actor/grad_norm", "grad norm"),
+    ("actor/lr", "learning rate"),
+    ("actor/entropy", "student entropy"),
+    ("critic/mean_token_score/mean", "teacher logp/token"),
+    ("actor/opd_inf_ratio", "OPD skipped"),
+    ("response_length/mean", "response tokens mean"),
+    ("response_length/clip_ratio", "responses clipped"),
+    ("response/aborted_ratio", "responses aborted"),
+    ("perf/max_memory_allocated_gb", "GPU allocated GB"),
+    ("timing_s/step", "step seconds"),
+    ("perf/throughput", "tokens/second"),
+)
+
+_DEBUG_PERCENT_METRICS = {
+    "actor/opd_inf_ratio",
+    "response_length/clip_ratio",
+    "response/aborted_ratio",
+}
+
+
 def _format_metric_value(value):
     """Format scalar metrics compactly while retaining useful precision."""
     if isinstance(value, bool):
@@ -85,6 +110,65 @@ def _metric_section(key):
         if key.startswith(prefixes):
             return section
     return "Other metrics"
+
+
+def format_debug_metrics_table(data: dict, step) -> str:
+    """Render only metrics that directly help diagnose OPD training."""
+    epoch = data.get("training/epoch")
+    logged_step = data.get("training/global_step", step)
+    title = f"Debug metrics | step {int(logged_step)}"
+    if isinstance(epoch, numbers.Number):
+        title += f" | epoch {_format_metric_value(epoch)}"
+
+    rows = []
+    for key, label in _DEBUG_METRICS:
+        value = data.get(key)
+        if not isinstance(value, numbers.Number):
+            continue
+        rendered = (
+            f"{float(value):.1%}" if key in _DEBUG_PERCENT_METRICS else _format_metric_value(value)
+        )
+        rows.append((label, rendered))
+
+    # Validation metric names contain their dataset name, so include matching
+    # accuracy values dynamically instead of hard-coding one dataset path.
+    for key, value in sorted(data.items()):
+        if (
+            key.startswith(("val-", "val/", "test/"))
+            and "/acc/" in key
+            and isinstance(value, numbers.Number)
+        ):
+            rows.append((key, _format_metric_value(value)))
+
+    if not rows:
+        return f"\n=== {title} ===\n(no selected debug metrics)"
+
+    metric_width = max(len("Metric"), *(len(label) for label, _ in rows))
+    value_width = max(len("Value"), *(len(value) for _, value in rows))
+    separator = f"+-{'-' * metric_width}-+-{'-' * value_width}-+"
+    lines = [
+        "",
+        f"=== {title} ===",
+        separator,
+        f"| {'Metric':<{metric_width}} | {'Value':>{value_width}} |",
+        separator,
+    ]
+    lines.extend(f"| {label:<{metric_width}} | {value:>{value_width}} |" for label, value in rows)
+    lines.append(separator)
+
+    response_clip_ratio = data.get("response_length/clip_ratio")
+    opd_inf_ratio = data.get("actor/opd_inf_ratio")
+    aborted_ratio = data.get("response/aborted_ratio")
+    alerts = []
+    if isinstance(response_clip_ratio, numbers.Real) and response_clip_ratio >= 0.25:
+        alerts.append(f"response clipping {float(response_clip_ratio):.1%}")
+    if isinstance(opd_inf_ratio, numbers.Real) and opd_inf_ratio >= 0.05:
+        alerts.append(f"OPD skipped tokens {float(opd_inf_ratio):.1%}")
+    if isinstance(aborted_ratio, numbers.Real) and aborted_ratio > 0:
+        alerts.append(f"aborted responses {float(aborted_ratio):.1%}")
+    if alerts:
+        lines.append("! " + " | ".join(alerts))
+    return "\n".join(lines)
 
 
 def format_metrics_table(data: dict, step) -> str:
@@ -170,13 +254,18 @@ class LocalLogger:
 
     def __init__(self, print_to_console=True):
         self.print_to_console = print_to_console
+        self.console_mode = os.environ.get("VERL_CONSOLE_LOG_MODE", "full").strip().lower()
 
     def flush(self):
         pass
 
     def log(self, data, step):
         if self.print_to_console:
-            print(format_metrics_table(data, step=step), flush=True)
+            if self.console_mode in {"debug", "compact"}:
+                output = format_debug_metrics_table(data, step=step)
+            else:
+                output = format_metrics_table(data, step=step)
+            print(output, flush=True)
 
 
 class DecoratorLoggerBase:

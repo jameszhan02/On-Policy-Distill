@@ -481,6 +481,10 @@ if __name__ == "__main__":
         "OPD_DUMP_NUM_SEQS",
         "OPD_DUMP_MAX_STEPS",
         "OPD_LARGE_CHUNK_THRESHOLD",
+        # Concise console diagnostics for smoke/debug runs.
+        "VERL_CONSOLE_LOG_MODE",
+        "VERL_CONSOLE_ROLLOUT_SAMPLES",
+        "VERL_CONSOLE_ROLLOUT_MAX_CHARS",
         # OPD: re-anchoring on fallback (kept for bench toggling); if set to
         # wandb: project / entity / api key / mode forwarded so Ray-spawned
         # workers can initialise the run even though they don't inherit the

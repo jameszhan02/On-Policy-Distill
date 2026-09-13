@@ -462,7 +462,8 @@ class RayPPOTrainer:
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
 
-        print(f"Dumped generations to {filename}")
+        if os.environ.get("VERL_CONSOLE_LOG_MODE", "full").strip().lower() not in {"debug", "compact"}:
+            print(f"Dumped generations to {filename}")
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -479,6 +480,21 @@ class RayPPOTrainer:
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
+
+            console_samples = max(0, int(os.environ.get("VERL_CONSOLE_ROLLOUT_SAMPLES", "0")))
+            max_chars = max(200, int(os.environ.get("VERL_CONSOLE_ROLLOUT_MAX_CHARS", "2000")))
+            for sample_idx in range(min(console_samples, len(inputs))):
+                prompt = inputs[sample_idx]
+                output = outputs[sample_idx]
+                prompt_display = prompt[:600] + ("..." if len(prompt) > 600 else "")
+                output_display = output[:max_chars] + (
+                    "... [full output in JSONL]" if len(output) > max_chars else ""
+                )
+                print(f"\n=== Student rollout | step {self.global_steps} | sample {sample_idx} ===")
+                print(f"[prompt]\n{prompt_display}")
+                print(f"[response]\n{output_display}")
+                print(f"[ground truth] {sample_gts[sample_idx]}")
+                print(f"[OPD score; not accuracy] {scores[sample_idx]:.6g}", flush=True)
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
             if "request_id" in batch.non_tensor_batch:
