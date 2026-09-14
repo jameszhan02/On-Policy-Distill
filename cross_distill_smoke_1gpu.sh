@@ -13,6 +13,37 @@ set -xeuo pipefail
 # MODEL_PATH is the student checkpoint. TEACHER_CKPT_PATH is the teacher
 # checkpoint. They can be HuggingFace model IDs or local checkpoint paths.
 
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "${REPO_ROOT}"
+
+# Keep the driver, Ray head, and Ray workers on exactly the same Python
+# environment. Reusing a Ray head started by a different Python is a common
+# cause of workers staying alive without ever registering.
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+    if [[ -x "${REPO_ROOT}/.venv/bin/python3" ]]; then
+        PYTHON_BIN="${REPO_ROOT}/.venv/bin/python3"
+    else
+        PYTHON_BIN=$(command -v python3 || true)
+    fi
+fi
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+    echo "No Python executable found. Set PYTHON_BIN or create ${REPO_ROOT}/.venv." >&2
+    exit 1
+fi
+
+if [[ -z "${RAY_BIN:-}" ]]; then
+    candidate_ray="$(dirname "${PYTHON_BIN}")/ray"
+    if [[ -x "${candidate_ray}" ]]; then
+        RAY_BIN="${candidate_ray}"
+    else
+        RAY_BIN=$(command -v ray || true)
+    fi
+fi
+if [[ -z "${RAY_BIN}" || ! -x "${RAY_BIN}" ]]; then
+    echo "Ray executable not found next to ${PYTHON_BIN}; set RAY_BIN explicitly." >&2
+    exit 1
+fi
+
 project_name="ON_POLICY_DISTILL"
 
 adv_estimator="opd"
@@ -125,14 +156,15 @@ gen_tp=1
 fsdp_size=1
 
 if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
-    python3 examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
+    "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
 fi
 
 if [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
-    ray status >/dev/null 2>&1 || ray start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+    "${RAY_BIN}" status >/dev/null 2>&1 || \
+        "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
 fi
 
-python3 -m verl.trainer.main_ppo \
+"${PYTHON_BIN}" -m verl.trainer.main_ppo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
