@@ -20,10 +20,12 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pprint import pprint
 from typing import Optional
 
@@ -59,6 +61,56 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+_GSM8K_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
+_GSM8K_NUMBER_RE = re.compile(_GSM8K_NUMBER)
+_GSM8K_STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})[ \t]*\Z")
+
+
+def _gsm8k_numbers_equal(left, right) -> bool:
+    """Compare GSM8K numeric answers while tolerating commas and decimals."""
+    if left is None or right is None:
+        return False
+    left = str(left).replace(",", "").strip()
+    right = str(right).replace(",", "").strip()
+    try:
+        return Decimal(left) == Decimal(right)
+    except InvalidOperation:
+        return left == right
+
+
+def _classify_gsm8k_response(response: str, ground_truth) -> dict:
+    """Diagnose the final-answer format separately from answer correctness."""
+    stripped = response.strip()
+    marker_count = stripped.count("####")
+    strict_match = _GSM8K_STRICT_FINAL_RE.search(stripped)
+    marker_tail = stripped.rsplit("####", maxsplit=1)[-1] if marker_count else ""
+    tail_numbers = _GSM8K_NUMBER_RE.findall(marker_tail)
+    prediction = tail_numbers[-1] if tail_numbers else None
+    format_valid = strict_match is not None and marker_count == 1
+
+    if marker_count > 1:
+        failure = "multiple_markers"
+    elif format_valid:
+        failure = None
+    elif marker_count == 0:
+        failure = "missing_marker"
+    elif not tail_numbers:
+        failure = "missing_number_after_marker"
+    else:
+        failure = "trailing_or_nonfinal_text"
+
+    loose_correct = _gsm8k_numbers_equal(prediction, ground_truth)
+    strict_prediction = strict_match.group(1) if strict_match is not None else None
+    return {
+        "format_valid": format_valid,
+        "marker_count": marker_count,
+        "extracted_answer": prediction,
+        "answer_correct": loose_correct,
+        "strict_correct": format_valid and _gsm8k_numbers_equal(strict_prediction, ground_truth),
+        "format_failure": failure,
+    }
 
 
 @dataclass
@@ -478,8 +530,50 @@ class RayPPOTrainer:
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
+            diagnoses = [_classify_gsm8k_response(output, gt) for output, gt in zip(outputs, sample_gts, strict=True)]
+
+            # OPD stores [teacher_logps | chunk_ids] in token_level_scores. The old
+            # raw sum mixed both halves and produced a large positive "OPD score"
+            # with no useful interpretation. Save only the teacher response-logp
+            # sum; console diagnostics below focus on format and correctness.
+            token_scores = batch.batch["token_level_scores"]
+            response_width = batch.batch["responses"].shape[-1]
+            response_chunk_ids = None
+            if token_scores.shape[-1] % 2 == 0 and token_scores.shape[-1] // 2 >= response_width:
+                split = token_scores.shape[-1] // 2
+                response_chunk_ids = token_scores[:, split:][:, -response_width:]
+                token_scores = token_scores[:, :split]
+            response_mask = batch.batch["response_mask"].bool()
+            response_scores = token_scores[:, -response_mask.shape[-1] :]
+            score_mask = response_mask & (~torch.isinf(response_scores))
+            scores = torch.where(score_mask, response_scores, 0.0).sum(-1).cpu().tolist()
+
+            terminal_ids = set()
+            if self.tokenizer.eos_token_id is not None:
+                terminal_ids.add(self.tokenizer.eos_token_id)
+            for terminal_token in ("<|eot_id|>", "<|im_end|>", "<|endoftext|>"):
+                token_id = self.tokenizer.convert_tokens_to_ids(terminal_token)
+                if terminal_token in self.tokenizer.all_special_tokens and isinstance(token_id, int):
+                    terminal_ids.add(token_id)
+
+            response_ids = batch.batch["responses"]
+            for sample_idx, diagnosis in enumerate(diagnoses):
+                valid_positions = response_mask[sample_idx].nonzero(as_tuple=True)[0]
+                eos_generated = False
+                eos_teacher_supervised = False
+                if valid_positions.numel() > 0:
+                    last_pos = int(valid_positions[-1].item())
+                    eos_generated = int(response_ids[sample_idx, last_pos].item()) in terminal_ids
+                    eos_teacher_supervised = eos_generated and bool(
+                        torch.isfinite(response_scores[sample_idx, last_pos]).item()
+                    )
+                    if response_chunk_ids is not None:
+                        eos_teacher_supervised = eos_teacher_supervised and bool(
+                            (response_chunk_ids[sample_idx, last_pos] >= 0).item()
+                        )
+                diagnosis["eos_generated"] = eos_generated
+                diagnosis["eos_teacher_supervised"] = eos_teacher_supervised
 
             console_samples = max(0, int(os.environ.get("VERL_CONSOLE_ROLLOUT_SAMPLES", "0")))
             max_chars = max(200, int(os.environ.get("VERL_CONSOLE_ROLLOUT_MAX_CHARS", "2000")))
@@ -494,11 +588,34 @@ class RayPPOTrainer:
                 print(f"[prompt]\n{prompt_display}")
                 print(f"[response]\n{output_display}")
                 print(f"[ground truth] {sample_gts[sample_idx]}")
-                print(f"[OPD score; not accuracy] {scores[sample_idx]:.6g}", flush=True)
+                diagnosis = diagnoses[sample_idx]
+                print(
+                    "[answer check] "
+                    f"format_valid={diagnosis['format_valid']} "
+                    f"markers={diagnosis['marker_count']} "
+                    f"prediction={diagnosis['extracted_answer']} "
+                    f"correct={diagnosis['answer_correct']} "
+                    f"failure={diagnosis['format_failure']} "
+                    f"eos={diagnosis['eos_generated']} "
+                    f"teacher_eos={diagnosis['eos_teacher_supervised']}",
+                    flush=True,
+                )
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            for key in (
+                "format_valid",
+                "marker_count",
+                "extracted_answer",
+                "answer_correct",
+                "strict_correct",
+                "format_failure",
+                "eos_generated",
+                "eos_teacher_supervised",
+            ):
+                reward_extra_infos_to_dump[key] = [diagnosis[key] for diagnosis in diagnoses]
+            reward_extra_infos_to_dump["teacher_logp_sum"] = scores
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
@@ -511,6 +628,24 @@ class RayPPOTrainer:
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
             )
+
+            count = max(len(diagnoses), 1)
+            eos_count = sum(item["eos_generated"] for item in diagnoses)
+            return {
+                "response/format_valid_ratio": sum(item["format_valid"] for item in diagnoses) / count,
+                "response/answer_correct_ratio": sum(item["answer_correct"] for item in diagnoses) / count,
+                "response/strict_correct_ratio": sum(item["strict_correct"] for item in diagnoses) / count,
+                "response/missing_final_answer_ratio": sum(
+                    item["format_failure"] in {"missing_marker", "missing_number_after_marker"}
+                    for item in diagnoses
+                )
+                / count,
+                "response/eos_generated_ratio": eos_count / count,
+                "response/eos_teacher_coverage": sum(
+                    item["eos_teacher_supervised"] for item in diagnoses
+                )
+                / max(eos_count, 1),
+            }
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -1304,7 +1439,9 @@ class RayPPOTrainer:
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        metrics.update(
+                            self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        )
 
                 # validate
                 if (

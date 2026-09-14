@@ -19,8 +19,8 @@ adv_estimator="opd"
 
 use_kl_in_reward=False
 kl_coef=0.0
-use_kl_loss=False
-kl_loss_coef=0.0
+use_kl_loss=${USE_KL_LOSS:-False}
+kl_loss_coef=${KL_LOSS_COEF:-0.0}
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
@@ -38,9 +38,21 @@ fi
 
 loss_agg_mode="token-mean"
 
-train_prompt_bsz=4
-n_resp_per_prompt=1
-train_prompt_mini_bsz=2
+# OPD is especially noisy at tiny batch sizes. Keep the PPO mini-batch equal
+# to the rollout batch so each rollout produces one genuinely on-policy
+# optimizer step. Dynamic token batching still splits the forward/backward
+# work into memory-safe micro-batches on the single GPU.
+train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-8}
+n_resp_per_prompt=${N_RESP_PER_PROMPT:-1}
+train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-${train_prompt_bsz}}
+
+if (( train_prompt_bsz % train_prompt_mini_bsz != 0 )); then
+    echo "TRAIN_PROMPT_BATCH_SIZE must be divisible by PPO_MINI_BATCH_SIZE" >&2
+    exit 1
+fi
+if (( train_prompt_mini_bsz != train_prompt_bsz )); then
+    echo "Warning: PPO_MINI_BATCH_SIZE != TRAIN_PROMPT_BATCH_SIZE; OPD will perform multiple updates per rollout" >&2
+fi
 
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
@@ -88,6 +100,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:T
 export OPD_DUMP_DIR=${OPD_DUMP_DIR:-"/tmp/opd_dumps"}
 export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
 export OPD_DUMP_MAX_STEPS=${OPD_DUMP_MAX_STEPS:-"3"}
+export OPD_TOKENIZER_DEBUG=${OPD_TOKENIZER_DEBUG:-"1"}
 
 # Keep the terminal useful during debugging: show one student rollout and only
 # the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.
@@ -95,9 +108,9 @@ export VERL_CONSOLE_LOG_MODE=${VERL_CONSOLE_LOG_MODE:-"debug"}
 export VERL_CONSOLE_ROLLOUT_SAMPLES=${VERL_CONSOLE_ROLLOUT_SAMPLES:-"1"}
 export VERL_CONSOLE_ROLLOUT_MAX_CHARS=${VERL_CONSOLE_ROLLOUT_MAX_CHARS:-"2000"}
 
-temperature=1.0
-top_p=1.0
-top_k=-1
+temperature=${TEMPERATURE:-1.0}
+top_p=${TOP_P:-1.0}
+top_k=${TOP_K:--1}
 
 val_top_p=1.0
 val_top_k=-1

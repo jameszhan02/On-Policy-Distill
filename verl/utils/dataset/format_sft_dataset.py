@@ -13,10 +13,24 @@ import torch
 from verl.utils.dataset.sft_dataset import SFTDataset
 
 
-DEFAULT_FORMAT_INSTRUCTION = (
+STRICT_FORMAT_INSTRUCTION = (
     "\n\nSolve the problem step by step. Your final line must be exactly "
     "`#### <number>`. Replace `<number>` with the numeric answer, and do not "
     "stop immediately after writing `####`."
+)
+
+# Deliberately include the wording used by the OPD parquet as well as stronger
+# and previously unseen-looking paraphrases. The target format is identical in
+# every case, so the model learns the contract instead of one trigger sentence.
+FORMAT_INSTRUCTION_VARIANTS = (
+    '\n\nLet\'s think step by step and output the final answer after "####".',
+    STRICT_FORMAT_INSTRUCTION,
+    "\n\nShow your reasoning, then finish with one final line in the form `#### <number>`.",
+    "\n\nSolve the problem. Put only the numeric answer after `####` on the last line.",
+    "\n\nReason step by step. End the response with `####` followed by the answer number.",
+    "\n\nGive a worked solution and conclude exactly once with `#### <number>`.",
+    "\n\nAt the end of your solution, write the final numeric result as `#### <number>`.",
+    "\n\nUse `####` only for the final answer line; it must be followed by the number.",
 )
 
 
@@ -32,22 +46,33 @@ class FormatSFTDataset(SFTDataset):
 
     def __init__(self, parquet_files, tokenizer, config, max_samples=-1):
         super().__init__(parquet_files, tokenizer, config, max_samples=max_samples)
-        instruction = config.get("format_instruction", DEFAULT_FORMAT_INSTRUCTION)
         self.format_loss_mode = str(config.get("format_loss_mode", "full")).lower()
         if self.format_loss_mode not in {"format", "full"}:
             raise ValueError("data.format_loss_mode must be 'format' or 'full'")
 
+        prompt_mode = str(config.get("format_prompt_mode", "diverse")).lower()
+        if prompt_mode not in {"diverse", "strict"}:
+            raise ValueError("data.format_prompt_mode must be 'diverse' or 'strict'")
+        custom_instruction = config.get("format_instruction")
+        seed = int(config.get("seed", 0))
+
         # extra_info.question is the raw GSM8K question. Append an explicit
-        # contract compatible with the format requested by OPD prompts.
-        self.prompts = [
-            self._with_format_instruction(prompt, instruction) for prompt in self.prompts
-        ]
+        # contract. Diverse mode deterministically distributes paraphrases so
+        # runs remain reproducible and include the exact OPD prompt wording.
+        formatted_prompts = []
+        for index, prompt in enumerate(self.prompts):
+            if custom_instruction is not None:
+                instruction = str(custom_instruction)
+            elif prompt_mode == "strict":
+                instruction = STRICT_FORMAT_INSTRUCTION
+            else:
+                instruction = FORMAT_INSTRUCTION_VARIANTS[(index + seed) % len(FORMAT_INSTRUCTION_VARIANTS)]
+            formatted_prompts.append(self._with_format_instruction(prompt, instruction))
+        self.prompts = formatted_prompts
 
     @staticmethod
     def _with_format_instruction(prompt, instruction):
         prompt = str(prompt).rstrip()
-        if "#### <number>" in prompt:
-            return prompt
         return prompt + instruction
 
     def __getitem__(self, item):

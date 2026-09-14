@@ -38,6 +38,7 @@ SFT_LR=${SFT_LR:-5e-6}
 SFT_EPOCHS=${SFT_EPOCHS:-1}
 SFT_SEED=${SFT_SEED:-44}
 SFT_FORMAT_LOSS_MODE=${SFT_FORMAT_LOSS_MODE:-full}
+SFT_FORMAT_PROMPT_MODE=${SFT_FORMAT_PROMPT_MODE:-diverse}
 SFT_MODEL_DTYPE=${SFT_MODEL_DTYPE:-bf16}
 SFT_OPTIMIZER=${SFT_OPTIMIZER:-AdamW8bit}
 SFT_OPTIMIZER_IMPL=${SFT_OPTIMIZER_IMPL:-bitsandbytes.optim}
@@ -53,6 +54,11 @@ fi
 
 if [[ "${SFT_FORMAT_LOSS_MODE}" != "format" && "${SFT_FORMAT_LOSS_MODE}" != "full" ]]; then
     echo "SFT_FORMAT_LOSS_MODE must be 'format' or 'full'" >&2
+    exit 1
+fi
+
+if [[ "${SFT_FORMAT_PROMPT_MODE}" != "diverse" && "${SFT_FORMAT_PROMPT_MODE}" != "strict" ]]; then
+    echo "SFT_FORMAT_PROMPT_MODE must be 'diverse' or 'strict'" >&2
     exit 1
 fi
 
@@ -72,6 +78,7 @@ echo "Micro batch:      ${SFT_MICRO_BATCH_SIZE}"
 echo "Max length:       ${SFT_MAX_LENGTH}"
 echo "Learning rate:    ${SFT_LR}"
 echo "Format loss mode: ${SFT_FORMAT_LOSS_MODE}"
+echo "Prompt mode:      ${SFT_FORMAT_PROMPT_MODE}"
 echo "Model dtype:      ${SFT_MODEL_DTYPE}"
 echo "Optimizer:        ${SFT_OPTIMIZER} (${SFT_OPTIMIZER_IMPL})"
 echo "FSDP strategy:    ${SFT_FSDP_STRATEGY}"
@@ -90,6 +97,7 @@ echo
     data.custom_cls.path=pkg://verl.utils.dataset.format_sft_dataset \
     data.custom_cls.name=FormatSFTDataset \
     +data.format_loss_mode="${SFT_FORMAT_LOSS_MODE}" \
+    +data.format_prompt_mode="${SFT_FORMAT_PROMPT_MODE}" \
     data.train_max_samples="${SFT_TRAIN_SAMPLES}" \
     data.val_max_samples="${SFT_VAL_SAMPLES}" \
     +data.shuffle=True \

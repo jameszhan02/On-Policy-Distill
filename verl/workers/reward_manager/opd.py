@@ -145,6 +145,7 @@ class TeacherClient:
         self.tokenizer = AutoTokenizer.from_pretrained(teacher_ckpt_path)
         self.student_tokenizer = None
         self._same_tokenizer = None  # cached result of tokenizer comparison
+        self._tokenizer_debug_printed = False
         self._run()
 
     def _is_same_tokenizer(self):
@@ -175,6 +176,101 @@ class TeacherClient:
             else:
                 self._family_cache[tok_id] = "unknown"
         return self._family_cache[tok_id]
+
+    @staticmethod
+    def _tokenizer_family_evidence(tokenizer):
+        """Return the exact vocabulary markers used by family detection plus OLMo probes."""
+        vocab = tokenizer.get_vocab()
+        probes = (
+            "<|begin_of_text|>",
+            "<|eot_id|>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<｜begin▁of▁sentence｜>",
+            "<｜end▁of▁sentence｜>",
+            "<|user|>",
+            "<|assistant|>",
+            "<|system|>",
+            "<|endoftext|>",
+        )
+        return {token: vocab[token] for token in probes if token in vocab}
+
+    @staticmethod
+    def _compact_template(template, max_chars=800):
+        if not template:
+            return "<none>"
+        template = str(template).replace("\n", "\\n")
+        return template[:max_chars] + ("..." if len(template) > max_chars else "")
+
+    def _print_tokenizer_debug_once(self):
+        """Print tokenizer-family detection and selected mapping without changing either."""
+        if self._tokenizer_debug_printed:
+            return
+        enabled = os.environ.get("OPD_TOKENIZER_DEBUG", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if not enabled:
+            return
+        self._tokenizer_debug_printed = True
+
+        same_tokenizer = self._is_same_tokenizer()
+        print("\n=== OPD tokenizer / mapping detection ===", flush=True)
+        for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
+            print(f"[{label}] name_or_path={tokenizer.name_or_path}", flush=True)
+            print(f"[{label}] class={tokenizer.__class__.__name__}", flush=True)
+            print(f"[{label}] detected_family={self._detect_model_family(tokenizer)}", flush=True)
+            print(
+                f"[{label}] detection_markers="
+                f"{json.dumps(self._tokenizer_family_evidence(tokenizer), ensure_ascii=False)}",
+                flush=True,
+            )
+            print(
+                f"[{label}] bos={tokenizer.bos_token!r}({tokenizer.bos_token_id}) "
+                f"eos={tokenizer.eos_token!r}({tokenizer.eos_token_id}) "
+                f"pad={tokenizer.pad_token!r}({tokenizer.pad_token_id})",
+                flush=True,
+            )
+            print(
+                f"[{label}] special_tokens_map="
+                f"{json.dumps(tokenizer.special_tokens_map, ensure_ascii=False, default=str)}",
+                flush=True,
+            )
+            print(
+                f"[{label}] chat_template={self._compact_template(getattr(tokenizer, 'chat_template', None))}",
+                flush=True,
+            )
+            try:
+                rendered_probe = tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": "You are a concise assistant."},
+                        {"role": "user", "content": "What is 1+1?"},
+                    ],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            except Exception as exc:
+                rendered_probe = f"<render error: {type(exc).__name__}: {exc}>"
+            print(
+                f"[{label}] rendered_probe={self._compact_template(rendered_probe)}",
+                flush=True,
+            )
+
+        print(f"[mapping] vocabularies_identical={same_tokenizer}", flush=True)
+        if same_tokenizer:
+            print("[mapping] selected_route=same_tokenizer_direct_shift", flush=True)
+        else:
+            student_family = self._detect_model_family(self.student_tokenizer)
+            teacher_family = self._detect_model_family(self.tokenizer)
+            print(f"[mapping] selected_route={student_family}_to_{teacher_family}", flush=True)
+            try:
+                mapping = self._build_chat_template_mapping()
+            except NotImplementedError as exc:
+                print(f"[mapping] supported=False error={exc}", flush=True)
+            else:
+                print("[mapping] supported=True replacement_rules:", flush=True)
+                for old, new in mapping:
+                    print(f"  {old!r} -> {new!r}", flush=True)
+        print("=== End OPD tokenizer / mapping detection ===\n", flush=True)
 
     def _build_chat_template_mapping(self):
         """Build string replacement rules from student chat template to teacher chat template.
@@ -773,6 +869,7 @@ class TeacherClient:
 
         assert student_tokenizer is not None, "To get knowledge of teacher, tokenizer of student must be passed"
         self.student_tokenizer = student_tokenizer
+        self._print_tokenizer_debug_once()
         input_ids = []
         attention_mask = batch.batch["attention_mask"].to(torch.bool)
         # response_length = batch.meta_info["response_length"]
@@ -1061,6 +1158,51 @@ class TeacherClient:
 
                 teacher_resp_ids = teacher_ids_no_gen[teacher_resp_start_tok:teacher_resp_end_tok]
 
+                # Compact runtime audit for the same number of samples shown by
+                # the trainer's rollout console. This makes terminal-token
+                # alignment visible without printing the full token mapping.
+                console_samples = max(0, int(os.environ.get("VERL_CONSOLE_ROLLOUT_SAMPLES", "0")))
+                if i < console_samples:
+                    student_terminal = None
+                    if student_resp_end_tok < len(student_ids):
+                        student_terminal_id = int(student_ids[student_resp_end_tok])
+                        student_terminal = (
+                            student_tokenizer.decode([student_terminal_id], skip_special_tokens=False),
+                            student_terminal_id,
+                        )
+
+                    teacher_terminal = None
+                    if teacher_resp_end_tok < len(teacher_ids_no_gen):
+                        teacher_terminal_id = int(teacher_ids_no_gen[teacher_resp_end_tok])
+                        teacher_terminal = (
+                            teacher_tokenizer.decode([teacher_terminal_id], skip_special_tokens=False),
+                            teacher_terminal_id,
+                        )
+
+                    teacher_eos_logp_idx = teacher_resp_end_tok - 1
+                    teacher_eos_logp = (
+                        float(teacher_logps[teacher_eos_logp_idx])
+                        if 0 <= teacher_eos_logp_idx < len(teacher_logps)
+                        else None
+                    )
+                    mapping_available = (
+                        student_terminal is not None
+                        and teacher_terminal is not None
+                        and teacher_eos_logp is not None
+                    )
+
+                    def _terminal_display(terminal):
+                        return "NONE" if terminal is None else f"{terminal[0]!r}({terminal[1]})"
+
+                    logp_display = "NONE" if teacher_eos_logp is None else f"{teacher_eos_logp:.6g}"
+                    print(
+                        f"[OPD EOS mapping] seq={i} available={mapping_available} "
+                        f"student={_terminal_display(student_terminal)} "
+                        f"teacher={_terminal_display(teacher_terminal)} "
+                        f"teacher_logp={logp_display}",
+                        flush=True,
+                    )
+
                 # teacher_logps[j] = logprob of predicting token at position j+1
                 # So for teacher token at position k, its logprob is teacher_logps[k-1]
                 # For response tokens [teacher_resp_start_tok, teacher_resp_end_tok),
@@ -1096,6 +1238,59 @@ class TeacherClient:
                         "student_resp_end_tok": student_resp_end_tok,
                         "teacher_resp_start_tok": teacher_resp_start_tok,
                         "teacher_resp_end_tok": teacher_resp_end_tok,
+                        # Explicit terminal-token audit. Token IDs are expected
+                        # to differ across tokenizer families; the important
+                        # invariant is that teacher_eos_logp_index predicts the
+                        # teacher terminal token and is assigned to the first
+                        # student terminal-token position.
+                        "eos_mapping": {
+                            "student_first_terminal_position": (
+                                student_resp_end_tok if student_resp_end_tok < len(student_ids) else None
+                            ),
+                            "student_terminal_tokens": [
+                                {
+                                    "position": idx,
+                                    "id": int(student_ids[idx]),
+                                    "text": student_tokenizer.decode(
+                                        [student_ids[idx]], skip_special_tokens=False
+                                    ),
+                                }
+                                for idx in range(student_resp_end_tok, len(student_ids))
+                            ],
+                            "teacher_first_terminal_position": (
+                                teacher_resp_end_tok
+                                if teacher_resp_end_tok < len(teacher_ids_no_gen)
+                                else None
+                            ),
+                            "teacher_terminal_tokens": [
+                                {
+                                    "position": idx,
+                                    "id": int(teacher_ids_no_gen[idx]),
+                                    "text": teacher_tokenizer.decode(
+                                        [teacher_ids_no_gen[idx]], skip_special_tokens=False
+                                    ),
+                                }
+                                for idx in range(teacher_resp_end_tok, len(teacher_ids_no_gen))
+                            ],
+                            "teacher_eos_logp_index": (
+                                teacher_resp_end_tok - 1
+                                if teacher_resp_end_tok > 0
+                                and teacher_resp_end_tok - 1 < len(teacher_logps)
+                                else None
+                            ),
+                            "teacher_eos_logp": (
+                                float(teacher_logps[teacher_resp_end_tok - 1])
+                                if teacher_resp_end_tok > 0
+                                and teacher_resp_end_tok - 1 < len(teacher_logps)
+                                else None
+                            ),
+                            "mapping_available": bool(
+                                student_resp_end_tok < len(student_ids)
+                                and teacher_resp_end_tok < len(teacher_ids_no_gen)
+                                and teacher_resp_end_tok > 0
+                                and teacher_resp_end_tok - 1 < len(teacher_logps)
+                            ),
+                        },
                         # Response text
                         "student_resp_text": student_tokenizer.decode(student_resp_ids, skip_special_tokens=False),
                         "teacher_resp_text": teacher_tokenizer.decode(teacher_resp_ids, skip_special_tokens=False),
