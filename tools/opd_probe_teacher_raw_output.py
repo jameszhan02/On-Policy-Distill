@@ -51,6 +51,16 @@ def main() -> None:
         help="Optional JSON list of chat messages. Defaults to a short GSM8K-style prompt.",
     )
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--no-eos-stop",
+        action="store_true",
+        help=(
+            "Do NOT stop generation at eos_token_id. Useful to deliberately see "
+            "whether the model treats eos as a genuine turn-end (stays coherent/"
+            "empty after it) or as a mere document separator in a packed corpus "
+            "(walks straight into a new, unrelated document after it)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.messages_json:
@@ -103,6 +113,10 @@ def main() -> None:
             do_sample=args.do_sample,
             temperature=args.temperature if args.do_sample else None,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            # Bug fix: without this, generate() ignores eos entirely and keeps
+            # sampling past it -- which is why a first run silently ran straight
+            # through "<|endoftext|>" into a second, unrelated GSM8K problem.
+            eos_token_id=None if args.no_eos_stop else tokenizer.eos_token_id,
         )
 
     prompt_len = prompt_ids["input_ids"].shape[-1]

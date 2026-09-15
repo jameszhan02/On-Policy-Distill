@@ -37,7 +37,33 @@ from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
+
+# config.json "model_type" -> our family label. This is set at conversion/save
+# time from the model's actual architecture class -- unlike eos_token or
+# chat_template, it exists and is reliable even for a base/template-less
+# checkpoint, since AutoModelForCausalLM needs it to pick the right class
+# regardless of instruction-tuning status.
+#
+# Known limitation: this maps ARCHITECTURE, not chat convention. A distilled
+# checkpoint can mix the two (e.g. deepseek-ai/DeepSeek-R1-Distill-Qwen-7B has
+# model_type=="qwen2" but uses DeepSeek's chat template/special tokens) -- for
+# that kind of case, the eos_token/chat_template checks above must take
+# priority, and this table is only consulted when those found nothing.
+_MODEL_TYPE_TO_FAMILY = {
+    "llama": "llama",
+    "olmo": "olmo",
+    "olmo2": "olmo",
+    "olmoe": "olmo",
+    "qwen": "qwen",
+    "qwen2": "qwen",
+    "qwen2_moe": "qwen",
+    "qwen3": "qwen",
+    "qwen3_moe": "qwen",
+    "deepseek": "deepseek",
+    "deepseek_v2": "deepseek",
+    "deepseek_v3": "deepseek",
+}
 
 teacher_topk_logps_padded, teacher_topk_indices_padded, teacher_chunk_ids_padded = None, None, None
 DEBUG = False
@@ -155,7 +181,51 @@ class TeacherClient:
         return self._same_tokenizer
 
     def _detect_model_family(self, tokenizer):
-        """Detect the model family of a tokenizer based on its vocabulary. Result is cached.
+        """Detect the model family of a tokenizer. Result is cached.
+
+        Deliberately does NOT use `tokenizer.get_vocab()` membership as
+        evidence anywhere in here anymore. Vocab membership only proves a
+        token id is *addressable* -- it says nothing about whether the model
+        was ever trained to treat it as meaningful, or whether this specific
+        checkpoint's real chat format ever writes it. That assumption broke
+        twice on OLMo-2 alone: its vocab contains an unused "<|im_end|>" id
+        (misclassifying it as "qwen"), and a follow-up fix assumed "<|user|>"/
+        "<|assistant|>" were themselves addressable vocab entries -- they are
+        NOT (verified against the real tokenizer.json: absent from both the
+        base BPE vocab and added_tokens; they're plain sub-word-tokenized text
+        that only ever appears inside the chat_template string).
+
+        Two signals are actually trustworthy, and both are used here:
+          1. `tokenizer.eos_token` -- the string the checkpoint's own config
+             designates as its real stop token. Unambiguous for LLaMA-Instruct
+             ("<|eot_id|>"), Qwen-chat ("<|im_end|>"), and DeepSeek
+             ("<｜end▁of▁sentence｜>"). Verified against each family's real HF
+             config, not assumed.
+          2. `tokenizer.chat_template` -- the literal Jinja2 template string
+             actually used to render conversations. Checking for a marker as
+             literal text *inside this string* (not vocab membership) proves
+             the checkpoint's real format uses it. Verified marker literalness
+             against each family's real chat_template (LLaMA-Instruct hardcodes
+             "<|start_header_id|>"/"<|end_header_id|>"/"<|eot_id|>" as literal
+             text but references its leading bos via the "{{ bos_token }}"
+             template *variable*, not literal "<|begin_of_text|>" text -- so
+             that marker specifically is NOT checked here; Qwen-chat hardcodes
+             "<|im_start|>"; DeepSeek hardcodes its fullwidth markers; OLMo/Tulu
+             hardcodes "<|user|>"/"<|assistant|>").
+
+        `eos_token` alone can't fully disambiguate: "<|endoftext|>" is a
+        generic tiktoken/GPT-2-lineage default shared by OLMo/Tulu-style chat
+        checkpoints and unrelated checkpoints from other lineages. For that
+        case, chat_template is the tiebreaker.
+
+        A checkpoint with no chat_template AND an ambiguous/generic eos_token
+        (a base/non-instruct checkpoint -- e.g. a real OLMo base/mid-train
+        teacher) falls back to `_family_from_model_type()`, which reads
+        config.json's model_type/architectures instead of guessing from vocab
+        lineage. That field is set from the model's actual architecture class
+        at conversion/save time, so it's present and reliable regardless of
+        instruction-tuning status. Only if that ALSO fails (offline, no
+        config found, unrecognized model_type) does this return "unknown".
 
         Returns:
             str: One of "llama", "qwen", "deepseek", "olmo", or "unknown".
@@ -164,27 +234,61 @@ class TeacherClient:
             self._family_cache = {}
         tok_id = id(tokenizer)
         if tok_id not in self._family_cache:
-            vocab = tokenizer.get_vocab()
-            if "<|begin_of_text|>" in vocab:
-                self._family_cache[tok_id] = "llama"
-            elif "<｜begin▁of▁sentence｜>" in vocab:
-                # DeepSeek family: uses fullwidth markers like <｜begin▁of▁sentence｜>,
-                # <｜User｜>, <｜Assistant｜>, <｜end▁of▁sentence｜>
-                self._family_cache[tok_id] = "deepseek"
-            elif "<|user|>" in vocab and "<|assistant|>" in vocab:
-                # OLMo / Tulu-style chat format: bare "<|user|>"/"<|assistant|>"/
-                # "<|system|>" role tags, eos_token doubles as the turn terminator
-                # (e.g. "<|endoftext|>"). MUST be checked before the "<|im_start|>"
-                # (qwen) probe below: OLMo-2's tiktoken-derived vocab happens to
-                # also contain "<|im_start|>"/"<|im_end|>" as leftover added tokens
-                # that its real chat template never uses, so checking qwen first
-                # would silently misclassify every OLMo teacher as "qwen".
-                self._family_cache[tok_id] = "olmo"
-            elif "<|im_start|>" in vocab:
-                self._family_cache[tok_id] = "qwen"
+            eos = tokenizer.eos_token
+            chat_template = getattr(tokenizer, "chat_template", None) or ""
+            if eos == "<|eot_id|>":
+                family = "llama"
+            elif eos == "<|im_end|>":
+                family = "qwen"
+            elif eos == "<｜end▁of▁sentence｜>":
+                family = "deepseek"
+            elif "<|user|>" in chat_template and "<|assistant|>" in chat_template:
+                family = "olmo"
+            elif "<|start_header_id|>" in chat_template or "<|eot_id|>" in chat_template:
+                family = "llama"
+            elif "<|im_start|>" in chat_template:
+                family = "qwen"
+            elif "<｜begin▁of▁sentence｜>" in chat_template or "<｜Assistant｜>" in chat_template:
+                family = "deepseek"
             else:
-                self._family_cache[tok_id] = "unknown"
+                # Neither eos_token nor chat_template gave an answer -- most
+                # likely a base/template-less checkpoint (exactly the case a
+                # missing chat_template on a real OLMo base/mid-train teacher
+                # hits). Fall back to config.json's model_type, which is set
+                # from the model's actual architecture regardless of
+                # instruction-tuning status.
+                family = self._family_from_model_type(tokenizer)
+            self._family_cache[tok_id] = family
         return self._family_cache[tok_id]
+
+    @staticmethod
+    def _family_from_model_type(tokenizer) -> str:
+        """Fall back to config.json's model_type/architectures for a checkpoint
+        whose tokenizer gave no eos_token/chat_template signal. Best-effort:
+        returns "unknown" on any failure (offline, gated repo, no matching
+        config alongside a bare tokenizer, exotic model_type) rather than
+        raising, since this is already the last-resort branch.
+        """
+        name_or_path = getattr(tokenizer, "name_or_path", None)
+        if not name_or_path:
+            return "unknown"
+        try:
+            config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=True)
+        except Exception as exc:  # noqa: BLE001 - best-effort fallback, never fatal here.
+            warnings.warn(
+                f"[_detect_model_family] Could not load AutoConfig for {name_or_path!r} "
+                f"to resolve model_type fallback: {type(exc).__name__}: {exc}"
+            )
+            return "unknown"
+        model_type = str(getattr(config, "model_type", "") or "").lower()
+        family = _MODEL_TYPE_TO_FAMILY.get(model_type, "unknown")
+        if family == "unknown":
+            warnings.warn(
+                f"[_detect_model_family] {name_or_path!r} has no eos_token/chat_template "
+                f"match and unrecognized model_type={model_type!r}; treating as unknown. "
+                f"Add it to _MODEL_TYPE_TO_FAMILY if this checkpoint is a known family."
+            )
+        return family
 
     @staticmethod
     def _tokenizer_family_evidence(tokenizer):
