@@ -152,7 +152,6 @@ pkill -f "worker.py"
 pkill -f "VLLM::EngineCore"
 ```
 
-
 ```bash
 ray stop
 ray start --head --num-gpus=1 --include-dashboard=false
@@ -183,7 +182,7 @@ Supported_tasks: ['generate']
 worker started...
 ```
 
-```bash 
+```bash
   MODEL_PATH="/data/shared_ckpt/Llama-3.2-1B-Instruct" \
   SFT_FORMAT_LOSS_MODE=format \
   SFT_TRAIN_SAMPLES=256 \
@@ -195,7 +194,7 @@ worker started...
   bash format_sft_gsm8k_1gpu.sh
 ```
 
-##  /data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span/global_step_32/huggingface
+## /data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span/global_step_32/huggingface
 
 Check processes:
 
@@ -204,8 +203,6 @@ ps -ef | grep -E "proxy.py|worker.py|VLLM::EngineCore" | grep -v grep
 ```
 
 Stop teacher service:
-
-
 
 Verify it actually stopped:
 
@@ -281,6 +278,8 @@ MODEL_PATH=/data/shared_ckpt/opd_smoke/Qwen2.5-0.5B-Instruct \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_smoke/Qwen2.5-0.5B-Instruct \
 bash cross_distill_smoke_1gpu.sh
 ```
+
+# /data/shengzhan/On-Policy-Distill/data/smoke_ckpts/ON_POLICY_DISTILL/OPD_DEBUG_500_STEPS/global_step_500/actor_hf_merged
 
 The smoke script will start Ray automatically if Ray is not already running:
 

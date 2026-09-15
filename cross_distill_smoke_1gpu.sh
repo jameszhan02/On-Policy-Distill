@@ -73,7 +73,7 @@ loss_agg_mode="token-mean"
 # to the rollout batch so each rollout produces one genuinely on-policy
 # optimizer step. Dynamic token batching still splits the forward/backward
 # work into memory-safe micro-batches on the single GPU.
-train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-8}
+train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-32}
 n_resp_per_prompt=${N_RESP_PER_PROMPT:-1}
 train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-${train_prompt_bsz}}
 
@@ -88,11 +88,18 @@ fi
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-500}
-test_freq=${TEST_FREQ:-50}
-save_freq=${SAVE_FREQ:-50}
+total_training_steps=${TOTAL_TRAINING_STEPS:-1500}
+test_freq=${TEST_FREQ:-200}
+save_freq=${SAVE_FREQ:-200}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
-actor_lr=${ACTOR_LR:-2e-7}
+# Was 2e-7: the repo's own real-scale config (cross_distill.sh) pairs lr=1e-6
+# with train_prompt_bsz=128 -- a ~5x LR bump for a ~16x batch bump (sub-linear
+# scaling, not full linear). At train_prompt_bsz going from 8 (an env override
+# some prior run used, below even this script's own default) back up toward
+# this script's own default of 32 (a 4x increase), a proportionate but
+# conservative bump is ~2-3x, not the full 5x -- start here and watch
+# grad_norm/entropy/OPD loss for instability before pushing further.
+actor_lr=${ACTOR_LR:-5e-7}
 actor_lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS:-50}
 
 NNODES=${NNODES:-1}
@@ -155,6 +162,18 @@ offload=True
 gen_tp=1
 fsdp_size=1
 
+# Was hardcoded to 1: vLLM generated rollouts one sequence at a time
+# regardless of train_prompt_bsz, so raising the batch size mostly bought
+# wall-clock time, not throughput. A small concurrency bump lets several
+# sequences generate together -- watch for vLLM OOM (this shares the GPU with
+# the teacher process per the smoke-test setup) and lower this first, before
+# touching train_prompt_bsz or gpu_memory_utilization, if it OOMs.
+max_num_seqs=${MAX_NUM_SEQS:-4}
+# vLLM's batched-token scheduling budget must cover max_num_seqs sequences
+# concurrently, not just one -- scale it with max_num_seqs instead of leaving
+# it pinned at a single sequence's length.
+max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS:-$((max_num_seqs * student_max_seq_len))}
+
 if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
     "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
 fi
@@ -216,8 +235,8 @@ fi
     actor_rollout_ref.rollout.gpu_memory_utilization=0.16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=${student_max_seq_len} \
-    actor_rollout_ref.rollout.max_num_seqs=1 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
+    actor_rollout_ref.rollout.max_num_seqs=${max_num_seqs} \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \
