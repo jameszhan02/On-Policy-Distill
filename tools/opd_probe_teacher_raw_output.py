@@ -72,9 +72,27 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
 
-    prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    print("\n=== Rendered prompt (from chat_template) ===")
-    print(prompt_text)
+    if getattr(tokenizer, "chat_template", None):
+        prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        print("\n=== Rendered prompt (from chat_template) ===")
+        print(prompt_text)
+    else:
+        # No chat_template in this checkpoint's tokenizer_config.json. Could mean
+        # this is a genuine base (non-instruct) model, or an instruct checkpoint
+        # whose tokenizer_config.json is incomplete/was copied without it. Either
+        # way, fall back to raw text so the probe still runs -- but the result
+        # tells you less: with no template, of course no template markers appear.
+        print(
+            "\n=== WARNING: tokenizer.chat_template is not set ===\n"
+            "Falling back to plain-text concatenation of message contents (no\n"
+            "special role markers will be inserted by this script). Verify\n"
+            "independently whether this checkpoint is meant to be a base model\n"
+            "or should have shipped a chat_template.",
+            flush=True,
+        )
+        bos = tokenizer.bos_token or ""
+        prompt_text = bos + "\n\n".join(m["content"] for m in messages) + "\n"
+        print(prompt_text)
 
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors="pt").to(device)
 
