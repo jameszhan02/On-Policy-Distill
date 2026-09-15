@@ -14,10 +14,15 @@ def detect_family(tokenizer) -> str:
     vocab = tokenizer.get_vocab()
     if "<|begin_of_text|>" in vocab:
         return "llama"
-    if "<|im_start|>" in vocab:
-        return "qwen"
     if "<\uff5cbegin\u2581of\u2581sentence\uff5c>" in vocab:
         return "deepseek"
+    # OLMo (Tulu-style) MUST be checked before the "<|im_start|>" (qwen) probe:
+    # OLMo-2's tiktoken-derived vocab also carries "<|im_start|>"/"<|im_end|>" as
+    # unused leftover added tokens, so checking qwen first would misclassify it.
+    if "<|user|>" in vocab and "<|assistant|>" in vocab:
+        return "olmo"
+    if "<|im_start|>" in vocab:
+        return "qwen"
     return "unknown"
 
 

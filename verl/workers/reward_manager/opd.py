@@ -158,7 +158,7 @@ class TeacherClient:
         """Detect the model family of a tokenizer based on its vocabulary. Result is cached.
 
         Returns:
-            str: One of "llama", "qwen", "deepseek", or "unknown".
+            str: One of "llama", "qwen", "deepseek", "olmo", or "unknown".
         """
         if not hasattr(self, '_family_cache'):
             self._family_cache = {}
@@ -167,12 +167,21 @@ class TeacherClient:
             vocab = tokenizer.get_vocab()
             if "<|begin_of_text|>" in vocab:
                 self._family_cache[tok_id] = "llama"
-            elif "<|im_start|>" in vocab:
-                self._family_cache[tok_id] = "qwen"
             elif "<｜begin▁of▁sentence｜>" in vocab:
                 # DeepSeek family: uses fullwidth markers like <｜begin▁of▁sentence｜>,
                 # <｜User｜>, <｜Assistant｜>, <｜end▁of▁sentence｜>
                 self._family_cache[tok_id] = "deepseek"
+            elif "<|user|>" in vocab and "<|assistant|>" in vocab:
+                # OLMo / Tulu-style chat format: bare "<|user|>"/"<|assistant|>"/
+                # "<|system|>" role tags, eos_token doubles as the turn terminator
+                # (e.g. "<|endoftext|>"). MUST be checked before the "<|im_start|>"
+                # (qwen) probe below: OLMo-2's tiktoken-derived vocab happens to
+                # also contain "<|im_start|>"/"<|im_end|>" as leftover added tokens
+                # that its real chat template never uses, so checking qwen first
+                # would silently misclassify every OLMo teacher as "qwen".
+                self._family_cache[tok_id] = "olmo"
+            elif "<|im_start|>" in vocab:
+                self._family_cache[tok_id] = "qwen"
             else:
                 self._family_cache[tok_id] = "unknown"
         return self._family_cache[tok_id]
@@ -278,10 +287,12 @@ class TeacherClient:
         Currently supports:
             - LLaMA 3.x (student) -> Qwen (teacher)
             - LLaMA 3.x (student) -> DeepSeek (teacher)
+            - LLaMA 3.x (student) -> OLMo (teacher)
             - Qwen (student) -> DeepSeek (teacher)
             - Qwen (student) -> LLaMA 3.x (teacher) [newly added, not yet validated end-to-end]
             - Qwen (student) -> Qwen (teacher) [same chat template, no mapping needed]
             - DeepSeek (student) -> DeepSeek (teacher) [same chat template, no mapping needed]
+            - OLMo (student) -> OLMo (teacher) [same chat template, no mapping needed]
 
         The mapping is a list of (old_str, new_str) tuples applied in order via str.replace().
         """
@@ -373,6 +384,33 @@ class TeacherClient:
             # DeepSeek (student) -> DeepSeek (teacher): same chat template format
             # (both use <｜User｜>, <｜Assistant｜>, <｜end▁of▁sentence｜>).
             # No string replacement needed. Re-tokenization handles vocab differences.
+            return []
+        elif student_family == "llama" and teacher_family == "olmo":
+            # LLaMA 3.x (student) -> OLMo (teacher)
+            # LLaMA format: <|begin_of_text|><|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>
+            # OLMo (Tulu) format (verified against allenai/OLMo-2-1124-7B-Instruct
+            # tokenizer_config.json chat_template, 2026-09-15):
+            #   {bos}<|system|>\n{content}\n<|user|>\n{content}\n<|assistant|>\n{content}{eos}
+            # where bos == eos == "<|endoftext|>". Turns are separated by a single "\n"
+            # already emitted at the end of the previous turn's content -- there is no
+            # blank line between turns like LLaMA's "<|end_header_id|>\n\n".
+            return [
+                # Must replace compound patterns first (longer -> shorter).
+                # First-turn system / user (preceded by <|begin_of_text|>, not <|eot_id|>).
+                ("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n", "<|endoftext|><|system|>\n"),
+                ("<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n", "<|endoftext|><|user|>\n"),
+                # Mid-conversation turns (preceded by the prior turn's <|eot_id|>).
+                ("<|eot_id|><|start_header_id|>system<|end_header_id|>\n\n", "\n<|system|>\n"),
+                ("<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n", "\n<|user|>\n"),
+                ("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", "\n<|assistant|>\n"),
+                # End-of-turn / end-of-sequence markers -> OLMo's single eos token.
+                ("<|eot_id|>", "<|endoftext|>\n"),
+                ("<|begin_of_text|>", "<|endoftext|>"),
+                ("<|end_of_text|>", "<|endoftext|>"),
+            ]
+        elif student_family == "olmo" and teacher_family == "olmo":
+            # OLMo (student) -> OLMo (teacher): same chat template format,
+            # no string replacement needed. Re-tokenization handles vocab differences.
             return []
         else:
             raise NotImplementedError(
@@ -1051,6 +1089,9 @@ class TeacherClient:
             elif student_family == "deepseek":
                 # DeepSeek: ...<｜Assistant｜>{response}
                 student_resp_marker = "<｜Assistant｜>"
+            elif student_family == "olmo":
+                # OLMo (Tulu): ...<|assistant|>\n{response}
+                student_resp_marker = "<|assistant|>\n"
             else:
                 raise NotImplementedError(f"Unsupported student model family: {student_family}")
 
@@ -1062,6 +1103,9 @@ class TeacherClient:
             elif teacher_family == "llama":
                 # LLaMA: ...assistant<|end_header_id|>\n\n{response}
                 teacher_resp_marker = "<|end_header_id|>\n\n"
+            elif teacher_family == "olmo":
+                # OLMo (Tulu): ...<|assistant|>\n{response}
+                teacher_resp_marker = "<|assistant|>\n"
             else:
                 raise NotImplementedError(f"Unsupported teacher model family: {teacher_family}")
 
@@ -1110,6 +1154,10 @@ class TeacherClient:
                 elif student_family == "deepseek":
                     # DeepSeek uses <｜end▁of▁sentence｜> as eos (already added above via eos_token_id)
                     pass
+                elif student_family == "olmo":
+                    # OLMo (Tulu) has no separate end-of-turn token distinct from eos;
+                    # "<|endoftext|>" is already added above via eos_token_id.
+                    pass
                 while student_resp_end_tok > student_resp_start_tok and student_ids[student_resp_end_tok - 1] in student_special_end_ids:
                     student_resp_end_tok -= 1
 
@@ -1152,6 +1200,10 @@ class TeacherClient:
                     eot_id = teacher_tokenizer.convert_tokens_to_ids("<|eot_id|>")
                     if isinstance(eot_id, int) and eot_id != teacher_tokenizer.unk_token_id:
                         teacher_special_end_ids.add(eot_id)
+                elif teacher_family == "olmo":
+                    # OLMo (Tulu) has no separate end-of-turn token distinct from eos;
+                    # "<|endoftext|>" is already added above via eos_token_id.
+                    pass
                 teacher_resp_end_tok = len(teacher_ids_no_gen)
                 while teacher_resp_end_tok > teacher_resp_start_tok and teacher_ids_no_gen[teacher_resp_end_tok - 1] in teacher_special_end_ids:
                     teacher_resp_end_tok -= 1
