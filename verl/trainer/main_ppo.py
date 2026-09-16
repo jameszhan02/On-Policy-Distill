@@ -476,6 +476,10 @@ if __name__ == "__main__":
         "TEACHER_N_WORKERS",
         "TEACHER_CKPT_PATH",
         "TEACHER_MAX_SEQ_LEN",
+        # OPD: raw r1_zero passthrough-prompt mode (read by opd.py's reward
+        # manager, which runs in a separate Ray worker process and otherwise
+        # never sees the driver shell's `export R1_ZERO_MODE=1`).
+        "R1_ZERO_MODE",
         # OPD: alignment dump configuration
         "OPD_DUMP_DIR",
         "OPD_DUMP_NUM_SEQS",
