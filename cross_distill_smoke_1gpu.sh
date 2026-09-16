@@ -203,9 +203,16 @@ fi
 # Raw passthrough chat_template: renders a single-user-turn `messages` list as
 # literally "{bos_token}{content}" -- no role headers, no <|eot_id|>/<|im_end|>
 # etc. baked into the PROMPT side by either tokenizer's own native template.
-# Double-quotes for the dict key (not single) so this survives being
-# single-quoted as a whole word in the Hydra override below.
-r1_zero_chat_template='{{ bos_token }}{{ messages[0]["content"] }}'
+#
+# The leading/trailing \" are load-bearing, not decorative: Hydra's own CLI
+# override grammar tries to parse any value starting with "{" as a structured
+# dict literal, and chokes on Jinja's "{{" with "no viable alternative at
+# input '{{ '". Wrapping the value in literal double-quote characters (not
+# just shell quoting -- verified against hydra's actual OverridesParser)
+# forces Hydra to treat it as an opaque string instead. Single quotes for the
+# dict key inside are safe precisely because they're not Hydra's quote
+# character.
+r1_zero_chat_template="\"{{ bos_token }}{{ messages[0]['content'] }}\""
 EXTRA_HYDRA_ARGS=()
 if [[ "${R1_ZERO_MODE}" == "1" ]]; then
     EXTRA_HYDRA_ARGS+=("data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")

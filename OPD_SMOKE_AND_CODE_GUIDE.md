@@ -166,6 +166,18 @@ TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```
 
+r1_zero
+
+```bash
+R1_ZERO_MODE=1 \
+MODEL_PATH=/data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span-512sample/global_step_64/huggingface \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+MAX_PROMPT_LENGTH=512 \
+STUDENT_MAX_SEQ_LEN=1280 \
+TEACHER_MAX_SEQ_LEN=1792 \
+bash cross_distill_smoke_1gpu.sh
+```
+
 Watch logs:
 
 ```bash
