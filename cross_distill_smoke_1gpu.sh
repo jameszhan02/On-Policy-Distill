@@ -215,7 +215,11 @@ fi
 r1_zero_chat_template="\"{{ bos_token }}{{ messages[0]['content'] }}\""
 EXTRA_HYDRA_ARGS=()
 if [[ "${R1_ZERO_MODE}" == "1" ]]; then
-    EXTRA_HYDRA_ARGS+=("data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")
+    # "+" (not plain "=") is required: apply_chat_template_kwargs starts as an
+    # empty dict in the base config (struct mode), so this is adding a new key,
+    # not overriding an existing one -- Hydra's own error message for the
+    # plain "=" form says so directly.
+    EXTRA_HYDRA_ARGS+=("+data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")
 fi
 
 if [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
