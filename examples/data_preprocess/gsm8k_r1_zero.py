@@ -31,28 +31,21 @@ import re
 
 import pandas as pd
 
-# Verbatim from lllm/alignment/prompts/r1_zero_three_shot_gsm8k.prompt.
-# Keep this in sync by hand if that file changes -- it's a separate repo, not
-# a dependency of this one.
-R1_ZERO_THREE_SHOT_TEMPLATE = (
+# Shrunk from lllm/alignment/prompts/r1_zero_three_shot_gsm8k.prompt: same
+# instruction + tag format (so the r1_zero eval grader still matches), but
+# only one short worked example instead of three, to save prompt tokens under
+# tight GPU memory budgets. Keep in sync by hand if the source template
+# changes -- it's a separate repo, not a dependency of this one.
+R1_ZERO_ONE_SHOT_TEMPLATE = (
     "A conversation between User and Assistant. The User asks a question, and the Assistant solves it. "
     "The Assistant first thinks about the reasoning process in the mind and then provides the User with "
     "the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within "
     "<answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> "
     "<answer> answer here </answer>.\n"
-    "User: There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they "
-    "are done, there will be 21 trees. How many trees did the grove workers plant today?\n"
-    "Assistant: <think> There are 15 trees originally. Then there were 21 trees after some more were "
-    "planted. So there must have been 21 - 15 = 6. So the answer is 6. </think> <answer> 6 </answer>\n"
     "User: If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking "
     "lot?\n"
     "Assistant: <think> There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. So the answer is 5. "
     "</think> <answer> 5 </answer>\n"
-    "User: Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left "
-    "in total?\n"
-    "Assistant: <think> Originally, Leah had 32 chocolates. Her sister had 42. So in total they had "
-    "32 + 42 = 74. After eating 35, they had 74 - 35 = 39. So the answer is 39. </think> <answer> 39 "
-    "</answer>\n"
     "User: {question}\n"
     "Assistant: <think>"
 )
@@ -68,7 +61,7 @@ def extract_solution(solution_str: str) -> str:
 
 
 def build_prompt(question: str) -> list[dict]:
-    r1_zero_text = R1_ZERO_THREE_SHOT_TEMPLATE.format(question=question)
+    r1_zero_text = R1_ZERO_ONE_SHOT_TEMPLATE.format(question=question)
     return [{"role": "user", "content": r1_zero_text}]
 
 
