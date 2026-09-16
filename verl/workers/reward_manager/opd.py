@@ -1348,6 +1348,10 @@ class TeacherClient:
                     teacher_resp_start_tok = len(
                         teacher_tokenizer(teacher_prompt_text, add_special_tokens=False)["input_ids"]
                     )
+                    # Only needed for the debug dump below (no marker search
+                    # happens in this mode), but the dump code references it
+                    # unconditionally, so compute it here too.
+                    teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
                     if teacher_resp_start_tok >= len(teacher_ids_no_gen):
                         warnings.warn(
                             f"[align seq {i}] R1_ZERO_MODE: teacher prompt re-encoding "

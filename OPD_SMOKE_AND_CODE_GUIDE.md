@@ -170,6 +170,8 @@ r1_zero
 
 ```bash
 R1_ZERO_MODE=1 \
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/train.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/val_small.parquet \
 MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
