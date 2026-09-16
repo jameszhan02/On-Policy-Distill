@@ -135,9 +135,9 @@ source .venv/bin/activate
 cd recipe/gkd/teacher
 
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
-TEACHER_GPU_MEMORY_UTILIZATION=0.19 \
-TEACHER_MAX_MODEL_LEN=1792 \
-TEACHER_MAX_NUM_BATCHED_TOKENS=1792 \
+TEACHER_GPU_MEMORY_UTILIZATION=0.17 \
+TEACHER_MAX_MODEL_LEN=1024 \
+TEACHER_MAX_NUM_BATCHED_TOKENS=1024 \
 TEACHER_ENFORCE_EAGER=0 \
 bash start_server_smoke_1gpu.sh
 ```
@@ -170,11 +170,8 @@ r1_zero
 
 ```bash
 R1_ZERO_MODE=1 \
-MODEL_PATH=/data/shengzhan/On-Policy-Distill/data/format_sft_ckpts/Llama-3.2-1B-format-span-512sample/global_step_64/huggingface \
+MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
-MAX_PROMPT_LENGTH=512 \
-STUDENT_MAX_SEQ_LEN=1280 \
-TEACHER_MAX_SEQ_LEN=1792 \
 bash cross_distill_smoke_1gpu.sh
 ```
 

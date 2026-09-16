@@ -88,7 +88,7 @@ fi
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-1500}
+total_training_steps=${TOTAL_TRAINING_STEPS:-1000}
 test_freq=${TEST_FREQ:-200}
 save_freq=${SAVE_FREQ:-200}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
@@ -115,7 +115,7 @@ TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Override EXP_NAME directly if you want a fixed name regardless of model paths.
 student_tag=$(basename "${MODEL_PATH}")
 teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
-exp_name=${EXP_NAME:-"OPD_DEBUG_500_STEPS"}
+exp_name=${EXP_NAME:-"OPE_R1OneShot_template"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 
