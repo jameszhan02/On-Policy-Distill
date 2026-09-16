@@ -63,10 +63,17 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
+# Console/debug-only diagnostics. R1_ZERO_MODE switches the final-answer
+# marker this looks for from GSM8K's own "#### number" convention to the
+# r1_zero eval harness's "<answer> number </answer>" tag -- otherwise every
+# r1_zero response is (wrongly) reported as missing_marker/incorrect here,
+# even when the model's <answer> tag matches the ground truth.
+_R1_ZERO_MODE = os.environ.get("R1_ZERO_MODE", "0").strip() == "1"
 _GSM8K_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 _GSM8K_NUMBER_RE = re.compile(_GSM8K_NUMBER)
 _GSM8K_STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})[ \t]*\Z")
 _GSM8K_MARKER_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})(?P<trailing>[\s\S]*)\Z")
+_R1_ZERO_ANSWER_TAG_RE = re.compile(rf"<answer>\s*({_GSM8K_NUMBER})\s*</answer>", re.IGNORECASE)
 _GSM8K_REPEATED_ANSWER_RE = re.compile(
     rf"\s*(?:the\s+answer\s+is|answer:?)\s+({_GSM8K_NUMBER})[ \t]*\.?[ \t]*\Z",
     re.IGNORECASE,
@@ -88,6 +95,32 @@ def _gsm8k_numbers_equal(left, right) -> bool:
 def _classify_gsm8k_response(response: str, ground_truth) -> dict:
     """Diagnose the final-answer format separately from answer correctness."""
     stripped = response.strip()
+
+    if _R1_ZERO_MODE:
+        tag_matches = _R1_ZERO_ANSWER_TAG_RE.findall(stripped)
+        marker_count = stripped.lower().count("<answer>")
+        prediction = tag_matches[-1] if tag_matches else None
+        format_valid = prediction is not None and marker_count == 1
+
+        if marker_count > 1:
+            failure = "multiple_markers"
+        elif format_valid:
+            failure = None
+        elif marker_count == 0:
+            failure = "missing_marker"
+        else:
+            failure = "missing_number_after_marker"
+
+        loose_correct = _gsm8k_numbers_equal(prediction, ground_truth)
+        return {
+            "format_valid": format_valid,
+            "marker_count": marker_count,
+            "extracted_answer": prediction,
+            "answer_correct": loose_correct,
+            "strict_correct": format_valid and loose_correct,
+            "format_failure": failure,
+        }
+
     marker_count = stripped.count("####")
     strict_match = _GSM8K_STRICT_FINAL_RE.search(stripped)
     final_marker_match = _GSM8K_MARKER_FINAL_RE.search(stripped) if marker_count == 1 else None
