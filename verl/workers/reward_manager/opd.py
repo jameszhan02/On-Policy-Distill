@@ -68,6 +68,15 @@ _MODEL_TYPE_TO_FAMILY = {
 teacher_topk_logps_padded, teacher_topk_indices_padded, teacher_chunk_ids_padded = None, None, None
 DEBUG = False
 
+# R1_ZERO_MODE: student/teacher prompts are rendered via a raw passthrough
+# chat_template (see cross_distill_smoke_1gpu.sh) -- literally
+# "{bos_token}{content}", no Llama/Qwen/OLMo role markers baked in by either
+# tokenizer's own native template. The family-based chat-template mapping
+# below assumes those role markers exist to translate between; they don't in
+# this mode, so retokenize_batch and the response-boundary detection take a
+# separate, simpler path gated on this flag instead.
+R1_ZERO_MODE = os.environ.get("R1_ZERO_MODE", "0").strip() == "1"
+
 # ---- Alignment dump configuration (controlled by environment variables) ----
 # OPD_DUMP_DIR: directory to write alignment debug dumps (disabled if unset/empty)
 # OPD_DUMP_NUM_SEQS: number of sequences to dump per step (default: 2)
@@ -328,6 +337,7 @@ class TeacherClient:
 
         same_tokenizer = self._is_same_tokenizer()
         print("\n=== OPD tokenizer / mapping detection ===", flush=True)
+        print(f"[mode] R1_ZERO_MODE={R1_ZERO_MODE}", flush=True)
         for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
             print(f"[{label}] name_or_path={tokenizer.name_or_path}", flush=True)
             print(f"[{label}] class={tokenizer.__class__.__name__}", flush=True)
@@ -524,6 +534,41 @@ class TeacherClient:
                 f"Please add a mapping in _build_chat_template_mapping()."
             )
 
+    def _swap_bos_eos_for_teacher(self, student_text: str) -> str:
+        """R1_ZERO_MODE only: swap the student tokenizer's own bos/eos strings
+        for the teacher tokenizer's, leaving everything else (the raw
+        r1_zero prompt text and the model's own response content) untouched.
+
+        Safe to call repeatedly (memoizes the resolved token strings on self).
+        """
+        if not hasattr(self, '_raw_mode_bos_eos'):
+            student_bos = self.student_tokenizer.bos_token or ""
+            teacher_bos = self.tokenizer.bos_token or ""
+            # Collect every string the student tokenizer might emit to mean
+            # "stop" -- eos_token plus any additional special tokens whose
+            # content looks like a generic end marker. Most checkpoints only
+            # ever use eos_token itself; this is defensive, not load-bearing.
+            student_eos_candidates = []
+            if self.student_tokenizer.eos_token:
+                student_eos_candidates.append(self.student_tokenizer.eos_token)
+            for extra in getattr(self.student_tokenizer, "additional_special_tokens", None) or []:
+                if extra not in student_eos_candidates and extra != student_bos:
+                    student_eos_candidates.append(extra)
+            teacher_eos = self.tokenizer.eos_token or ""
+            self._raw_mode_bos_eos = (student_bos, teacher_bos, student_eos_candidates, teacher_eos)
+
+        student_bos, teacher_bos, student_eos_candidates, teacher_eos = self._raw_mode_bos_eos
+        teacher_text = student_text
+        if student_bos and teacher_text.startswith(student_bos):
+            teacher_text = teacher_bos + teacher_text[len(student_bos):]
+        elif teacher_bos:
+            teacher_text = teacher_bos + teacher_text
+        if teacher_eos:
+            for tok in student_eos_candidates:
+                if tok and tok != teacher_eos:
+                    teacher_text = teacher_text.replace(tok, teacher_eos)
+        return teacher_text
+
     def retokenize_batch(self, batch):
         """Convert a batch of student token ID sequences to teacher token ID sequences.
 
@@ -538,8 +583,8 @@ class TeacherClient:
         """
         if self._is_same_tokenizer():
             return batch
-        
-        if not hasattr(self, '_template_mapping'):
+
+        if not R1_ZERO_MODE and not hasattr(self, '_template_mapping'):
             self._template_mapping = self._build_chat_template_mapping()
 
         input_id_list = []
@@ -547,39 +592,44 @@ class TeacherClient:
         for seq_idx in range(len(batch)):
             student_text = self.student_tokenizer.decode(batch[seq_idx], skip_special_tokens=False)
 
-            teacher_text = student_text
-            for old_str, new_str in self._template_mapping:
-                teacher_text = teacher_text.replace(old_str, new_str)
+            if R1_ZERO_MODE:
+                # Raw-prompt mode: the prompt content is identical literal text
+                # for both tokenizers (no role markers to translate). The only
+                # difference is each tokenizer's own bos-string prefix and its
+                # own natural eos string -- swap those directly instead of
+                # using the family-based chat-template mapping table, which
+                # assumes role markers that don't exist in this mode.
+                teacher_text = self._swap_bos_eos_for_teacher(student_text)
+            else:
+                teacher_text = student_text
+                for old_str, new_str in self._template_mapping:
+                    teacher_text = teacher_text.replace(old_str, new_str)
 
-            if seq_idx == 0:
-                # print(f"[DEBUG retokenize] student_text:\n{student_text}")
-                # print(f"[DEBUG retokenize] teacher_text:\n{teacher_text}")
-                pass
-            # Strip trailing \n that may arise from template mapping:
-            # - LLaMA->Qwen: <|eot_id|> -> <|im_end|>\n leaves a trailing \n
-            # - LLaMA->DeepSeek: <|eot_id|> -> <｜end▁of▁sentence｜> (no trailing \n, rstrip harmless)
-            # Only strip if the original student text ended with an eos/eot special token
-            # (meaning the \n came from mapping, not from the actual content).
-            # NOTE: For Qwen->DeepSeek, the mapping handles <|im_end|>\n -> <｜end▁of▁sentence｜>
-            # atomically, so no trailing \n remains. For same-template pairs (Qwen->Qwen,
-            # DeepSeek->DeepSeek), text is unchanged so no stripping is needed.
-            student_family = self._detect_model_family(self.student_tokenizer)
-            if student_family == "llama":
-                student_has_eos = any(
-                    student_text.endswith(tok)
-                    for tok in ["<|eot_id|>", "<|end_of_text|>"]
-                )
-                if student_has_eos:
-                    teacher_text = teacher_text.rstrip('\n')
-            elif student_family == "qwen":
-                # Qwen->Qwen: no mapping, text unchanged, no trailing \n issue.
-                # Qwen->DeepSeek: <|im_end|>\n -> <｜end▁of▁sentence｜> already clean.
-                # Qwen->LLaMA: <|im_end|>\n -> <|eot_id|> already clean (no trailing \n added).
-                pass
-            elif student_family == "deepseek":
-                # DeepSeek->DeepSeek: same chat template format, no conversion,
-                # no trailing \n issue. Text is passed through unchanged.
-                pass
+                # Strip trailing \n that may arise from template mapping:
+                # - LLaMA->Qwen: <|eot_id|> -> <|im_end|>\n leaves a trailing \n
+                # - LLaMA->DeepSeek: <|eot_id|> -> <｜end▁of▁sentence｜> (no trailing \n, rstrip harmless)
+                # Only strip if the original student text ended with an eos/eot special token
+                # (meaning the \n came from mapping, not from the actual content).
+                # NOTE: For Qwen->DeepSeek, the mapping handles <|im_end|>\n -> <｜end▁of▁sentence｜>
+                # atomically, so no trailing \n remains. For same-template pairs (Qwen->Qwen,
+                # DeepSeek->DeepSeek), text is unchanged so no stripping is needed.
+                student_family = self._detect_model_family(self.student_tokenizer)
+                if student_family == "llama":
+                    student_has_eos = any(
+                        student_text.endswith(tok)
+                        for tok in ["<|eot_id|>", "<|end_of_text|>"]
+                    )
+                    if student_has_eos:
+                        teacher_text = teacher_text.rstrip('\n')
+                elif student_family == "qwen":
+                    # Qwen->Qwen: no mapping, text unchanged, no trailing \n issue.
+                    # Qwen->DeepSeek: <|im_end|>\n -> <｜end▁of▁sentence｜> already clean.
+                    # Qwen->LLaMA: <|im_end|>\n -> <|eot_id|> already clean (no trailing \n added).
+                    pass
+                elif student_family == "deepseek":
+                    # DeepSeek->DeepSeek: same chat template format, no conversion,
+                    # no trailing \n issue. Text is passed through unchanged.
+                    pass
 
             new_input_id = self.tokenizer(teacher_text, add_special_tokens=False)['input_ids']
             if self.max_seq_len:
@@ -1179,39 +1229,48 @@ class TeacherClient:
             teacher_tokenizer = self.tokenizer
             student_tokenizer = self.student_tokenizer
 
-            # Detect model families for response boundary markers
-            student_family = self._detect_model_family(student_tokenizer)
-            teacher_family = self._detect_model_family(teacher_tokenizer)
-
-            # Precompute the response-start markers (as text) for locating response boundaries
-            if student_family == "llama":
-                # LLaMA: ...assistant<|end_header_id|>\n\n{response}
-                student_resp_marker = "<|end_header_id|>\n\n"
-            elif student_family == "qwen":
-                # Qwen: ...<|im_start|>assistant\n{response}
-                student_resp_marker = "<|im_start|>assistant\n"
-            elif student_family == "deepseek":
-                # DeepSeek: ...<｜Assistant｜>{response}
-                student_resp_marker = "<｜Assistant｜>"
-            elif student_family == "olmo":
-                # OLMo (Tulu): ...<|assistant|>\n{response}
-                student_resp_marker = "<|assistant|>\n"
+            if R1_ZERO_MODE:
+                # No chat-template role markers exist to search for in this
+                # mode -- response boundaries are derived directly from the
+                # batch's own known prompt length (student side) and a
+                # teacher-side re-encoding of the student's own prompt slice
+                # (teacher side), not from a decoded-text marker search.
+                student_family = teacher_family = "raw"
+                prompt_length = batch.batch["prompts"].shape[-1]
             else:
-                raise NotImplementedError(f"Unsupported student model family: {student_family}")
+                # Detect model families for response boundary markers
+                student_family = self._detect_model_family(student_tokenizer)
+                teacher_family = self._detect_model_family(teacher_tokenizer)
 
-            # Teacher response marker depends on teacher family
-            if teacher_family == "qwen":
-                teacher_resp_marker = "<|im_start|>assistant\n"
-            elif teacher_family == "deepseek":
-                teacher_resp_marker = "<｜Assistant｜>"
-            elif teacher_family == "llama":
-                # LLaMA: ...assistant<|end_header_id|>\n\n{response}
-                teacher_resp_marker = "<|end_header_id|>\n\n"
-            elif teacher_family == "olmo":
-                # OLMo (Tulu): ...<|assistant|>\n{response}
-                teacher_resp_marker = "<|assistant|>\n"
-            else:
-                raise NotImplementedError(f"Unsupported teacher model family: {teacher_family}")
+                # Precompute the response-start markers (as text) for locating response boundaries
+                if student_family == "llama":
+                    # LLaMA: ...assistant<|end_header_id|>\n\n{response}
+                    student_resp_marker = "<|end_header_id|>\n\n"
+                elif student_family == "qwen":
+                    # Qwen: ...<|im_start|>assistant\n{response}
+                    student_resp_marker = "<|im_start|>assistant\n"
+                elif student_family == "deepseek":
+                    # DeepSeek: ...<｜Assistant｜>{response}
+                    student_resp_marker = "<｜Assistant｜>"
+                elif student_family == "olmo":
+                    # OLMo (Tulu): ...<|assistant|>\n{response}
+                    student_resp_marker = "<|assistant|>\n"
+                else:
+                    raise NotImplementedError(f"Unsupported student model family: {student_family}")
+
+                # Teacher response marker depends on teacher family
+                if teacher_family == "qwen":
+                    teacher_resp_marker = "<|im_start|>assistant\n"
+                elif teacher_family == "deepseek":
+                    teacher_resp_marker = "<｜Assistant｜>"
+                elif teacher_family == "llama":
+                    # LLaMA: ...assistant<|end_header_id|>\n\n{response}
+                    teacher_resp_marker = "<|end_header_id|>\n\n"
+                elif teacher_family == "olmo":
+                    # OLMo (Tulu): ...<|assistant|>\n{response}
+                    teacher_resp_marker = "<|assistant|>\n"
+                else:
+                    raise NotImplementedError(f"Unsupported teacher model family: {teacher_family}")
 
             for i in range(local_batch_size):
                 student_ids = input_ids[i]  # list[int], student prompt+response
@@ -1220,23 +1279,29 @@ class TeacherClient:
 
                 # --- Step A: Find response boundaries in both sequences ---
 
-                # Student: decode full sequence, find last occurrence of response marker
-                student_full_text = student_tokenizer.decode(student_ids, skip_special_tokens=False)
-                student_resp_start_char = student_full_text.rfind(student_resp_marker)
-                if student_resp_start_char == -1:
-                    # Fallback: can't find marker, fill zeros
-                    warnings.warn(f"[align seq {i}] Cannot find student response marker, filling zeros")
-                    continue
-                student_resp_start_char += len(student_resp_marker)
+                if R1_ZERO_MODE:
+                    # Student: prompt length is already known from the batch
+                    # itself -- no marker search needed.
+                    student_resp_start_tok = int(attention_mask[i, :prompt_length].sum().item())
+                    student_full_text = student_tokenizer.decode(student_ids, skip_special_tokens=False)
+                else:
+                    # Student: decode full sequence, find last occurrence of response marker
+                    student_full_text = student_tokenizer.decode(student_ids, skip_special_tokens=False)
+                    student_resp_start_char = student_full_text.rfind(student_resp_marker)
+                    if student_resp_start_char == -1:
+                        # Fallback: can't find marker, fill zeros
+                        warnings.warn(f"[align seq {i}] Cannot find student response marker, filling zeros")
+                        continue
+                    student_resp_start_char += len(student_resp_marker)
 
-                # Find the token index where the response content starts in student
-                student_resp_start_tok = 0
-                decoded_so_far = ""
-                for tok_idx in range(len(student_ids)):
-                    decoded_so_far = student_tokenizer.decode(student_ids[:tok_idx + 1], skip_special_tokens=False)
-                    if len(decoded_so_far) >= student_resp_start_char:
-                        student_resp_start_tok = tok_idx + 1
-                        break
+                    # Find the token index where the response content starts in student
+                    student_resp_start_tok = 0
+                    decoded_so_far = ""
+                    for tok_idx in range(len(student_ids)):
+                        decoded_so_far = student_tokenizer.decode(student_ids[:tok_idx + 1], skip_special_tokens=False)
+                        if len(decoded_so_far) >= student_resp_start_char:
+                            student_resp_start_tok = tok_idx + 1
+                            break
 
                 # Find the token index where the response content ends in student
                 # (exclude trailing special tokens)
@@ -1255,8 +1320,9 @@ class TeacherClient:
                         tok_id = student_tokenizer.convert_tokens_to_ids(special_tok)
                         if isinstance(tok_id, int) and tok_id != student_tokenizer.unk_token_id:
                             student_special_end_ids.add(tok_id)
-                elif student_family == "deepseek":
-                    # DeepSeek uses <｜end▁of▁sentence｜> as eos (already added above via eos_token_id)
+                elif student_family in ("deepseek", "raw"):
+                    # DeepSeek, and raw r1_zero mode, have no separate end-of-turn
+                    # token distinct from eos (already added above via eos_token_id).
                     pass
                 elif student_family == "olmo":
                     # OLMo (Tulu) has no separate end-of-turn token distinct from eos;
@@ -1267,24 +1333,45 @@ class TeacherClient:
 
                 student_resp_ids = student_ids[student_resp_start_tok:student_resp_end_tok]
 
-                # Teacher: decode full sequence, find last occurrence of response marker
-                # Remove the last generated token (teacher generates 1 extra token during prefill)
+                # Teacher generates 1 extra token during prefill; drop it before locating boundaries.
                 teacher_ids_no_gen = teacher_ids[:-1]
-                teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
-                teacher_resp_start_char = teacher_full_text.rfind(teacher_resp_marker)
-                if teacher_resp_start_char == -1:
-                    warnings.warn(f"[align seq {i}] Cannot find teacher response marker, filling zeros")
-                    continue
-                teacher_resp_start_char += len(teacher_resp_marker)
 
-                # Find the token index where the response content starts in teacher
-                teacher_resp_start_tok = 0
-                decoded_so_far = ""
-                for tok_idx in range(len(teacher_ids_no_gen)):
-                    decoded_so_far = teacher_tokenizer.decode(teacher_ids_no_gen[:tok_idx + 1], skip_special_tokens=False)
-                    if len(decoded_so_far) >= teacher_resp_start_char:
-                        teacher_resp_start_tok = tok_idx + 1
-                        break
+                if R1_ZERO_MODE:
+                    # Re-encode the student's own prompt slice (bos/eos swapped
+                    # for the teacher) to get the teacher's prompt token count
+                    # directly -- no marker search needed, since the prompt
+                    # content is identical literal text on both sides.
+                    student_prompt_text = student_tokenizer.decode(
+                        student_ids[:student_resp_start_tok], skip_special_tokens=False
+                    )
+                    teacher_prompt_text = self._swap_bos_eos_for_teacher(student_prompt_text)
+                    teacher_resp_start_tok = len(
+                        teacher_tokenizer(teacher_prompt_text, add_special_tokens=False)["input_ids"]
+                    )
+                    if teacher_resp_start_tok >= len(teacher_ids_no_gen):
+                        warnings.warn(
+                            f"[align seq {i}] R1_ZERO_MODE: teacher prompt re-encoding "
+                            f"({teacher_resp_start_tok} tok) covers the whole teacher sequence "
+                            f"({len(teacher_ids_no_gen)} tok); skipping"
+                        )
+                        continue
+                else:
+                    # Teacher: decode full sequence, find last occurrence of response marker
+                    teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
+                    teacher_resp_start_char = teacher_full_text.rfind(teacher_resp_marker)
+                    if teacher_resp_start_char == -1:
+                        warnings.warn(f"[align seq {i}] Cannot find teacher response marker, filling zeros")
+                        continue
+                    teacher_resp_start_char += len(teacher_resp_marker)
+
+                    # Find the token index where the response content starts in teacher
+                    teacher_resp_start_tok = 0
+                    decoded_so_far = ""
+                    for tok_idx in range(len(teacher_ids_no_gen)):
+                        decoded_so_far = teacher_tokenizer.decode(teacher_ids_no_gen[:tok_idx + 1], skip_special_tokens=False)
+                        if len(decoded_so_far) >= teacher_resp_start_char:
+                            teacher_resp_start_tok = tok_idx + 1
+                            break
 
                 # Teacher response ends before trailing special tokens
                 teacher_special_end_ids = set()
@@ -1296,8 +1383,9 @@ class TeacherClient:
                         tok_id = teacher_tokenizer.convert_tokens_to_ids(special_tok)
                         if isinstance(tok_id, int) and tok_id != teacher_tokenizer.unk_token_id:
                             teacher_special_end_ids.add(tok_id)
-                elif teacher_family == "deepseek":
-                    # DeepSeek uses <｜end▁of▁sentence｜> as eos (already added above via eos_token_id)
+                elif teacher_family in ("deepseek", "raw"):
+                    # DeepSeek, and raw r1_zero mode, have no separate end-of-turn
+                    # token distinct from eos (already added above via eos_token_id).
                     pass
                 elif teacher_family == "llama":
                     # LLaMA 3.x uses <|eot_id|> (128009) as end-of-turn, distinct from eos

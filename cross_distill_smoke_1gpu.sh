@@ -118,8 +118,26 @@ teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
 exp_name=${EXP_NAME:-"OPD_DEBUG_500_STEPS"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/smoke/train.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/smoke/val.parquet"}
+
+# R1_ZERO_MODE: train on the r1_zero <think>/<answer> protocol (matching what
+# lgsm8k_eval.py's grader actually checks) instead of this repo's own
+# "#### number" instruction. Set R1_ZERO_MODE=1 to turn this on. This changes
+# three things together, gated on the same flag: (1) default train/test files
+# point at the r1_zero-prompted GSM8K data instead of the "####" smoke set,
+# (2) that data gets auto-generated via gsm8k_r1_zero.py if missing, (3) a raw
+# passthrough chat_template override is added below so prompts render as
+# literal "{bos}{r1_zero text}" with no Llama/Qwen/OLMo role markers baked in
+# -- matching the raw-prompt format R1-Zero-style teacher training/eval uses,
+# instead of wrapping it inside this tokenizer's own native chat template.
+R1_ZERO_MODE=${R1_ZERO_MODE:-0}
+export R1_ZERO_MODE
+if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/train.parquet"}
+    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/test.parquet"}
+else
+    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/smoke/train.parquet"}
+    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/smoke/val.parquet"}
+fi
 ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-"${CKPTS_DIR}/rollouts"}
 VALIDATION_DATA_DIR=${VALIDATION_DATA_DIR:-"${CKPTS_DIR}/validation"}
 
@@ -175,7 +193,22 @@ max_num_seqs=${MAX_NUM_SEQS:-4}
 max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS:-$((max_num_seqs * student_max_seq_len))}
 
 if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
-    "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
+    if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+        "${PYTHON_BIN}" examples/data_preprocess/gsm8k_r1_zero.py --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero"
+    else
+        "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
+    fi
+fi
+
+# Raw passthrough chat_template: renders a single-user-turn `messages` list as
+# literally "{bos_token}{content}" -- no role headers, no <|eot_id|>/<|im_end|>
+# etc. baked into the PROMPT side by either tokenizer's own native template.
+# Double-quotes for the dict key (not single) so this survives being
+# single-quoted as a whole word in the Hydra override below.
+r1_zero_chat_template='{{ bos_token }}{{ messages[0]["content"] }}'
+EXTRA_HYDRA_ARGS=()
+if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+    EXTRA_HYDRA_ARGS+=("data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")
 fi
 
 if [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
@@ -266,4 +299,5 @@ fi
     trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}" \
     trainer.validation_data_dir="${VALIDATION_DATA_DIR}" \
     trainer.resume_mode=auto \
-    trainer.log_val_generations=1
+    trainer.log_val_generations=1 \
+    ${EXTRA_HYDRA_ARGS[@]+"${EXTRA_HYDRA_ARGS[@]}"}

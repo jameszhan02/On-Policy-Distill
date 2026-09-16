@@ -41,7 +41,7 @@ _METRIC_DESCRIPTIONS = {
     "response_length/mean": "mean generated response tokens",
     "response_length/clip_ratio": "fraction reaching response-length limit",
     "response/aborted_ratio": "fraction of empty or aborted responses",
-    "response/format_valid_ratio": "fraction with exactly one final `#### number` line",
+    "response/format_valid_ratio": "fraction with one `#### number` final answer, allowing a repeated answer sentence",
     "response/answer_correct_ratio": "fraction whose last post-marker number is correct",
     "response/strict_correct_ratio": "fraction both correctly formatted and numerically correct",
     "response/missing_final_answer_ratio": "fraction missing marker or number after marker",

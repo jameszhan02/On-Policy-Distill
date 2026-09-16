@@ -21,6 +21,11 @@ STRICT_FORMAT_INSTRUCTION = (
 )
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({NUMBER})[ \t]*\Z")
+MARKER_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({NUMBER})(?P<trailing>[\s\S]*)\Z")
+REPEATED_ANSWER_RE = re.compile(
+    rf"\s*(?:the\s+answer\s+is|answer:?)\s+({NUMBER})[ \t]*\.?[ \t]*\Z",
+    re.IGNORECASE,
+)
 LOOSE_ANSWER_RE = re.compile(rf"####\s*({NUMBER})")
 NUMBER_RE = re.compile(NUMBER)
 
@@ -97,10 +102,19 @@ def classify_response(response: str, ground_truth: str | None) -> dict:
     stripped = response.strip()
     strict_match = STRICT_FINAL_RE.search(stripped)
     marker_count = stripped.count("####")
+    final_marker_match = MARKER_FINAL_RE.search(stripped) if marker_count == 1 else None
     marker_tail = stripped.rsplit("####", maxsplit=1)[-1] if marker_count else ""
     tail_numbers = NUMBER_RE.findall(marker_tail)
     prediction = tail_numbers[-1] if tail_numbers else None
-    format_valid = strict_match is not None and marker_count == 1
+    format_prediction = strict_match.group(1) if strict_match is not None else None
+
+    if final_marker_match is not None and format_prediction is None:
+        marker_prediction = final_marker_match.group(1)
+        repeated_answer_match = REPEATED_ANSWER_RE.fullmatch(final_marker_match.group("trailing"))
+        if repeated_answer_match is not None and numbers_equal(marker_prediction, repeated_answer_match.group(1)):
+            format_prediction = marker_prediction
+
+    format_valid = format_prediction is not None and marker_count == 1
 
     if marker_count > 1:
         failure_type = "multiple_markers"
@@ -118,7 +132,7 @@ def classify_response(response: str, ground_truth: str | None) -> dict:
         "marker_count": marker_count,
         "prediction": prediction,
         "loose_correct": numbers_equal(prediction, ground_truth),
-        "strict_correct": format_valid and numbers_equal(strict_match.group(1), ground_truth),
+        "strict_correct": format_valid and numbers_equal(format_prediction, ground_truth),
         "failure_type": failure_type,
     }
 

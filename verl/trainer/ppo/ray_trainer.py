@@ -66,6 +66,11 @@ from verl.utils.tracking import ValidationGenerationsLogger
 _GSM8K_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 _GSM8K_NUMBER_RE = re.compile(_GSM8K_NUMBER)
 _GSM8K_STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})[ \t]*\Z")
+_GSM8K_MARKER_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})(?P<trailing>[\s\S]*)\Z")
+_GSM8K_REPEATED_ANSWER_RE = re.compile(
+    rf"\s*(?:the\s+answer\s+is|answer:?)\s+({_GSM8K_NUMBER})[ \t]*\.?[ \t]*\Z",
+    re.IGNORECASE,
+)
 
 
 def _gsm8k_numbers_equal(left, right) -> bool:
@@ -85,10 +90,19 @@ def _classify_gsm8k_response(response: str, ground_truth) -> dict:
     stripped = response.strip()
     marker_count = stripped.count("####")
     strict_match = _GSM8K_STRICT_FINAL_RE.search(stripped)
+    final_marker_match = _GSM8K_MARKER_FINAL_RE.search(stripped) if marker_count == 1 else None
     marker_tail = stripped.rsplit("####", maxsplit=1)[-1] if marker_count else ""
     tail_numbers = _GSM8K_NUMBER_RE.findall(marker_tail)
     prediction = tail_numbers[-1] if tail_numbers else None
-    format_valid = strict_match is not None and marker_count == 1
+    format_prediction = strict_match.group(1) if strict_match is not None else None
+
+    if final_marker_match is not None and format_prediction is None:
+        marker_prediction = final_marker_match.group(1)
+        repeated_answer_match = _GSM8K_REPEATED_ANSWER_RE.fullmatch(final_marker_match.group("trailing"))
+        if repeated_answer_match is not None and _gsm8k_numbers_equal(marker_prediction, repeated_answer_match.group(1)):
+            format_prediction = marker_prediction
+
+    format_valid = format_prediction is not None and marker_count == 1
 
     if marker_count > 1:
         failure = "multiple_markers"
@@ -108,7 +122,7 @@ def _classify_gsm8k_response(response: str, ground_truth) -> dict:
         "marker_count": marker_count,
         "extracted_answer": prediction,
         "answer_correct": loose_correct,
-        "strict_correct": format_valid and _gsm8k_numbers_equal(strict_prediction, ground_truth),
+        "strict_correct": format_valid and _gsm8k_numbers_equal(format_prediction, ground_truth),
         "format_failure": failure,
     }
 
