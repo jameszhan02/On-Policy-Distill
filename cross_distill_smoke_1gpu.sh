@@ -179,6 +179,7 @@ infer_ppo_max_token_len=${INFER_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
 offload=True
 gen_tp=1
 fsdp_size=1
+keep_low_precision_grads=${KEEP_LOW_PRECISION_GRADS:-True}
 
 # Was hardcoded to 1: vLLM generated rollouts one sequence at a time
 # regardless of train_prompt_bsz, so raising the batch size mostly bought
@@ -187,6 +188,7 @@ fsdp_size=1
 # the teacher process per the smoke-test setup) and lower this first, before
 # touching train_prompt_bsz or gpu_memory_utilization, if it OOMs.
 max_num_seqs=${MAX_NUM_SEQS:-4}
+rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
 # vLLM's batched-token scheduling budget must cover max_num_seqs sequences
 # concurrently, not just one -- scale it with max_num_seqs instead of leaving
 # it pinned at a single sequence's length.
@@ -261,6 +263,7 @@ fi
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=sync \
+    actor_rollout_ref.rollout.enforce_eager=${rollout_enforce_eager} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
@@ -271,6 +274,7 @@ fi
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
+    actor_rollout_ref.actor.fsdp_config.keep_low_precision_grads=${keep_low_precision_grads} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \

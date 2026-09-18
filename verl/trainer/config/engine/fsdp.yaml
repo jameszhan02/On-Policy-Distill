@@ -31,6 +31,9 @@ forward_prefetch: False
 # model dtype of fsdp
 model_dtype: fp32
 
+# Keep gradients in the mixed-precision parameter dtype instead of upcasting to FP32
+keep_low_precision_grads: false
+
 # Whether to use original parameters in fsdp. Only avaiable in fsdp1
 use_orig_params: false
 
