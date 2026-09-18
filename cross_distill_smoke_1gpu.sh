@@ -179,7 +179,7 @@ infer_ppo_max_token_len=${INFER_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
 offload=True
 gen_tp=1
 fsdp_size=1
-keep_low_precision_grads=${KEEP_LOW_PRECISION_GRADS:-True}
+actor_model_dtype=${ACTOR_MODEL_DTYPE:-bfloat16}
 
 # Was hardcoded to 1: vLLM generated rollouts one sequence at a time
 # regardless of train_prompt_bsz, so raising the batch size mostly bought
@@ -274,7 +274,7 @@ fi
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
-    actor_rollout_ref.actor.fsdp_config.keep_low_precision_grads=${keep_low_precision_grads} \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=${actor_model_dtype} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \

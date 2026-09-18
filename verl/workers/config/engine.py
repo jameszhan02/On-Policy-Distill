@@ -116,7 +116,6 @@ class FSDPEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
-        keep_low_precision_grads (bool): Keep gradients in the FSDP parameter dtype instead of upcasting to FP32.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
@@ -132,7 +131,6 @@ class FSDPEngineConfig(EngineConfig):
     model_dtype: str = "fp32"
     use_orig_params: bool = False
     mixed_precision: Optional[dict[str, Any]] = None
-    keep_low_precision_grads: bool = False
     seed: int = 42
     full_determinism: bool = False
     ulysses_sequence_parallel_size: int = 1
