@@ -177,6 +177,15 @@ TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```
 
+```bash
+## teacher rollout test
+ python3 examples/diagnostics/print_teacher_rollouts.py \
+    --model /data/shared_ckpt/opd_teacher \
+    --data /data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/test.parquet \
+    --num-samples 8 \
+    --max-tokens 640
+```
+
 Watch logs:
 
 ```bash
