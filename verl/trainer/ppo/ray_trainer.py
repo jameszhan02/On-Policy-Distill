@@ -575,8 +575,16 @@ class RayPPOTrainer:
             rollout_data_dir (str): Directory path to save the rollout data
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+            response_mask = batch.batch["response_mask"].bool()
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            raw_outputs = [
+                self.tokenizer.decode(
+                    batch.batch["responses"][sample_idx][response_mask[sample_idx]],
+                    skip_special_tokens=False,
+                )
+                for sample_idx in range(batch.batch["responses"].shape[0])
+            ]
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
             diagnoses = [_classify_gsm8k_response(output, gt) for output, gt in zip(outputs, sample_gts, strict=True)]
 
@@ -591,7 +599,6 @@ class RayPPOTrainer:
                 split = token_scores.shape[-1] // 2
                 response_chunk_ids = token_scores[:, split:][:, -response_width:]
                 token_scores = token_scores[:, :split]
-            response_mask = batch.batch["response_mask"].bool()
             response_scores = token_scores[:, -response_mask.shape[-1] :]
             score_mask = response_mask & (~torch.isinf(response_scores))
             scores = torch.where(score_mask, response_scores, 0.0).sum(-1).cpu().tolist()
@@ -626,14 +633,14 @@ class RayPPOTrainer:
             max_chars = max(200, int(os.environ.get("VERL_CONSOLE_ROLLOUT_MAX_CHARS", "2000")))
             for sample_idx in range(min(console_samples, len(inputs))):
                 prompt = inputs[sample_idx]
-                output = outputs[sample_idx]
+                output = raw_outputs[sample_idx]
                 prompt_display = prompt[:600] + ("..." if len(prompt) > 600 else "")
                 output_display = output[:max_chars] + (
                     "... [full output in JSONL]" if len(output) > max_chars else ""
                 )
                 print(f"\n=== Student rollout | step {self.global_steps} | sample {sample_idx} ===")
                 print(f"[prompt]\n{prompt_display}")
-                print(f"[response]\n{output_display}")
+                print(f"[response with special tokens]\n{output_display}")
                 print(f"[ground truth] {sample_gts[sample_idx]}")
                 diagnosis = diagnoses[sample_idx]
                 print(
