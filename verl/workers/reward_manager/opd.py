@@ -1714,6 +1714,7 @@ class OPDRewardManager(AbstractRewardManager):
 
                 prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
                 response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+                response_debug_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
                 ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
                 data_source = data_item.non_tensor_batch[self.reward_fn_key]
@@ -1727,6 +1728,7 @@ class OPDRewardManager(AbstractRewardManager):
                     "idx": i,
                     "prompt_str": prompt_str,
                     "response_str": response_str,
+                    "response_debug_str": response_debug_str,
                     "ground_truth": ground_truth,
                     "data_source": data_source,
                     "extra_info": extra_info,
@@ -1773,7 +1775,10 @@ class OPDRewardManager(AbstractRewardManager):
                 if already_print_data_sources[data_source] < self.num_examine:
                     already_print_data_sources[data_source] += 1
                     print("[prompt]", sample["prompt_str"][:500])
-                    print("[response]", sample["response_str"][:500])
+                    response_debug = sample["response_debug_str"]
+                    if len(response_debug) > 800:
+                        response_debug = response_debug[:500] + " ... [middle omitted] ... " + response_debug[-300:]
+                    print("[response with special tokens]", response_debug)
                     gt_str = str(sample["ground_truth"])
                     print("[ground_truth]", gt_str[:200] + ("..." if len(gt_str) > 200 else ""))
                     if isinstance(score, dict):
