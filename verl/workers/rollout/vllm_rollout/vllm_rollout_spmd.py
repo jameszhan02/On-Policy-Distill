@@ -80,7 +80,7 @@ from verl.utils.import_utils import deprecated
 from verl.utils.model import get_lora_rank_from_adapter
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.ray_utils import ray_noset_visible_devices
-from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+from verl.utils.torch_functional import pad_2d_list_to_length
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, is_version_ge
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
 from verl.workers.config import HFModelConfig, RolloutConfig
@@ -324,9 +324,6 @@ class vLLMRollout(BaseRollout):
         attention_mask = prompts.batch["attention_mask"]
         position_ids = prompts.batch["position_ids"]
 
-        # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
-
         batch_size = idx.size(0)
 
         non_tensor_batch = prompts.non_tensor_batch
@@ -405,11 +402,13 @@ class vLLMRollout(BaseRollout):
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
             response = []
+            response_lengths = []
             rollout_log_probs = []
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
                     response.append(response_ids)
+                    response_lengths.append(min(len(response_ids), max_len))
                     if self.config.calculate_log_probs:
                         curr_log_prob = []
                         for i, logprob in enumerate(output.outputs[sample_id].logprobs):
@@ -439,9 +438,14 @@ class vLLMRollout(BaseRollout):
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
         response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        response_attention_mask = get_response_mask(
-            response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype
-        )
+        # vLLM already returns each sample as an unpadded token-id list. Build
+        # the mask from those exact lengths instead of inferring it from one
+        # EOS id after padding. The latter is ambiguous for tokenizers with
+        # multiple terminal ids or pad=eos and can mark padded slots as valid.
+        response_attention_mask = (
+            torch.arange(response_length, device=response.device).unsqueeze(0)
+            < torch.tensor(response_lengths, device=response.device).unsqueeze(1)
+        ).to(dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
