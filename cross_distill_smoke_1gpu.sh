@@ -115,7 +115,7 @@ TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Override EXP_NAME directly if you want a fixed name regardless of model paths.
 student_tag=$(basename "${MODEL_PATH}")
 teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
-exp_name=${EXP_NAME:-"9_rep_32"}
+exp_name=${EXP_NAME:-"8_rep_32_to_7"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 
