@@ -41,6 +41,8 @@ def main():
                         help="vLLM max_num_batched_tokens.")
     parser.add_argument("--max-model-len", type=int, default=30720,
                         help="vLLM max_model_len (prompt+generation).")
+    parser.add_argument("--request-batch-size", type=int, default=0,
+                        help="Split each incoming teacher request into batches of this size; 0 disables splitting.")
     parser.add_argument("--enforce-eager", action="store_true",
                         help="Disable CUDA graph capture to reduce smoke-test memory usage.")
     # vLLM HTTP engine options (backend=vllm_http)
@@ -102,9 +104,27 @@ def main():
             with Timer(name="get_prompt_topk_logprobs", initial_text=True, logger=functools.partial(print, flush=True)):
                 ### try and sendback error
                 try:
-                    responses, logps, indices = engine.get_topk_logprobs(
-                        prompt_token_ids, temperature, max_new_tokens=max_tokens, only_response=only_response
-                    )
+                    request_batch_size = args.request_batch_size or len(prompt_token_ids)
+                    responses, logps, indices = [], [], []
+                    for start in range(0, len(prompt_token_ids), request_batch_size):
+                        end = min(start + request_batch_size, len(prompt_token_ids))
+                        chunk_max_tokens = max_tokens[start:end] if isinstance(max_tokens, list) else max_tokens
+                        print(
+                            f"Teacher request chunk {start // request_batch_size + 1}/"
+                            f"{(len(prompt_token_ids) + request_batch_size - 1) // request_batch_size}: "
+                            f"samples [{start}:{end})",
+                            flush=True,
+                        )
+                        chunk_responses, chunk_logps, chunk_indices = engine.get_topk_logprobs(
+                            prompt_token_ids[start:end],
+                            temperature,
+                            max_new_tokens=chunk_max_tokens,
+                            only_response=only_response,
+                        )
+                        responses.extend(chunk_responses)
+                        logps.extend(chunk_logps)
+                        indices.extend(chunk_indices)
+                        print(f"Teacher request chunk [{start}:{end}) completed", flush=True)
                 except Exception as e:
                     print("[Server Error] Exception occurred during generation:", str(e))
                     socket.send(serialize({"status": "error", "reason": f"Generate failed: {str(e)}"}))

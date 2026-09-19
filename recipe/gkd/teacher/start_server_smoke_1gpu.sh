@@ -19,6 +19,7 @@ N_LOGPROBS=${TEACHER_N_LOGPROBS:-1}
 GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.25}
 MAX_NUM_BATCHED_TOKENS=${TEACHER_MAX_NUM_BATCHED_TOKENS:-1280}
 MAX_MODEL_LEN=${TEACHER_MAX_MODEL_LEN:-1280}
+REQUEST_BATCH_SIZE=${TEACHER_REQUEST_BATCH_SIZE:-4}
 ENFORCE_EAGER=${TEACHER_ENFORCE_EAGER:-1}
 
 wait_server_ready() {
@@ -58,6 +59,7 @@ nohup python3 worker.py \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --max-model-len "${MAX_MODEL_LEN}" \
+    --request-batch-size "${REQUEST_BATCH_SIZE}" \
     $([[ "${ENFORCE_EAGER}" == "1" ]] && printf '%s' "--enforce-eager") \
     &> worker.log &
 
