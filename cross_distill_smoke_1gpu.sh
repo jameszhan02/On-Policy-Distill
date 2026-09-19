@@ -180,6 +180,7 @@ offload=True
 gen_tp=1
 fsdp_size=1
 actor_model_dtype=${ACTOR_MODEL_DTYPE:-float32}
+enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD:-False}
 
 # Was hardcoded to 1: vLLM generated rollouts one sequence at a time
 # regardless of train_prompt_bsz, so raising the batch size mostly bought
@@ -266,6 +267,7 @@ fi
     actor_rollout_ref.rollout.enforce_eager=${rollout_enforce_eager} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.enable_activation_offload=${enable_activation_offload} \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${actor_lr_warmup_steps} \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \

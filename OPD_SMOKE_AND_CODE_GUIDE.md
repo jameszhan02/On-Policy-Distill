@@ -135,6 +135,15 @@ source .venv/bin/activate
 cd recipe/gkd/teacher
 
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+TEACHER_GPU_MEMORY_UTILIZATION=0.15 \
+TEACHER_MAX_MODEL_LEN=896 \
+TEACHER_MAX_NUM_BATCHED_TOKENS=256 \
+TEACHER_ENFORCE_EAGER=0 \
+bash start_server_smoke_1gpu.sh
+```
+
+```bash
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 TEACHER_GPU_MEMORY_UTILIZATION=0.17 \
 TEACHER_MAX_MODEL_LEN=1024 \
 TEACHER_MAX_NUM_BATCHED_TOKENS=1024 \
@@ -170,6 +179,7 @@ r1_zero
 
 ```bash
 R1_ZERO_MODE=1 \
+ENABLE_ACTIVATION_OFFLOAD=True
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/train.parquet \
 TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/val_small.parquet \
 MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
