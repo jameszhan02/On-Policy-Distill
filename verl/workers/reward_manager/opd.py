@@ -183,6 +183,24 @@ class TeacherClient:
         self._tokenizer_debug_printed = False
         self._run()
 
+    @staticmethod
+    def _is_context_length_error(reason: str) -> bool:
+        reason = reason.lower()
+        return (
+            "maximum model length" in reason
+            or "max_model_len" in reason
+            or "prompt length" in reason
+            or "context length" in reason
+        )
+
+    @staticmethod
+    def _empty_teacher_result(num_samples: int):
+        """Return invalid OPD entries whose teacher gradient contribution is zero."""
+        responses = [torch.empty(0, dtype=torch.long) for _ in range(num_samples)]
+        logps = [torch.full((1, 1), float("inf"), dtype=torch.float32) for _ in range(num_samples)]
+        indices = [torch.zeros((1, 1), dtype=torch.long) for _ in range(num_samples)]
+        return responses, logps, indices
+
     def _is_same_tokenizer(self):
         """Check if teacher and student tokenizers have the same vocabulary. Result is cached."""
         if self._same_tokenizer is None:
@@ -994,6 +1012,23 @@ class TeacherClient:
 
                 if isinstance(response, dict) and response.get("status") == "error":
                     reason = response.get("reason", "unknown")
+                    if self._is_context_length_error(reason):
+                        # The teacher cannot score this request, but an oversized
+                        # context should not abort the whole PPO step. The inf
+                        # sentinel is consumed downstream as zero OPD signal.
+                        print(
+                            "[WARNING] Skipping OPD teacher signal for context-overflowed "
+                            f"microbatch: {reason}"
+                        )
+                        samples_per_future = len(batch) // max(len(futures), 1)
+                        offset = 0
+                        for future_idx, future in enumerate(futures):
+                            count = samples_per_future
+                            if future_idx == len(futures) - 1:
+                                count = len(batch) - offset
+                            future.set_result(self._empty_teacher_result(count))
+                            offset += count
+                        continue
                     err = RuntimeError(f"Teacher error: {reason}")
                     for f in futures:
                         f.set_exception(err)
