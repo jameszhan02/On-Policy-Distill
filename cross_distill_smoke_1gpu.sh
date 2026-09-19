@@ -115,7 +115,7 @@ TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Override EXP_NAME directly if you want a fixed name regardless of model paths.
 student_tag=$(basename "${MODEL_PATH}")
 teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
-exp_name=${EXP_NAME:-"9_rep"}
+exp_name=${EXP_NAME:-"9_rep_32"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 
@@ -179,7 +179,7 @@ infer_ppo_max_token_len=${INFER_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
 offload=True
 gen_tp=1
 fsdp_size=1
-actor_model_dtype=${ACTOR_MODEL_DTYPE:-bfloat16}
+# actor_model_dtype=${ACTOR_MODEL_DTYPE:-bfloat16}
 
 # Was hardcoded to 1: vLLM generated rollouts one sequence at a time
 # regardless of train_prompt_bsz, so raising the batch size mostly bought
