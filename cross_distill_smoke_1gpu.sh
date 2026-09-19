@@ -179,7 +179,7 @@ infer_ppo_max_token_len=${INFER_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
 offload=True
 gen_tp=1
 fsdp_size=1
-actor_model_dtype=${ACTOR_MODEL_DTYPE:-bfloat32}
+actor_model_dtype=${ACTOR_MODEL_DTYPE:-float32}
 
 # Was hardcoded to 1: vLLM generated rollouts one sequence at a time
 # regardless of train_prompt_bsz, so raising the batch size mostly bought
