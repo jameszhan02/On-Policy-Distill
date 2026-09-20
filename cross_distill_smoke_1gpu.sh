@@ -58,8 +58,8 @@ clip_ratio_high=0.28
 opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-2.0}
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-256}
-max_response_length=${MAX_RESPONSE_LENGTH:-384}
-student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-640}
+max_response_length=${MAX_RESPONSE_LENGTH:-608}
+student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-896}
 
 if (( student_max_seq_len < max_prompt_length + max_response_length )); then
     echo "STUDENT_MAX_SEQ_LEN (${student_max_seq_len}) must cover prompt + response" \
@@ -176,7 +176,13 @@ sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=${ACTOR_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
 infer_ppo_max_token_len=${INFER_PPO_MAX_TOKEN_LEN:-${student_max_seq_len}}
-offload=True
+# Keep model parameters offloaded between rollout and training, but do not use
+# verl's generic optimizer offload with PagedAdamW8bit. The generic reload path
+# calls .to(cuda) on every optimizer-state tensor before backward, defeating
+# bitsandbytes paging and causing the step-2 memory peak after Adam state has
+# been initialized by step 1.
+param_offload=${PARAM_OFFLOAD:-True}
+optimizer_offload=${OPTIMIZER_OFFLOAD:-False}
 gen_tp=1
 fsdp_size=1
 actor_model_dtype=${ACTOR_MODEL_DTYPE:-float32}
@@ -274,8 +280,8 @@ fi
     actor_rollout_ref.actor.optim.optimizer=PagedAdamW8bit \
     actor_rollout_ref.actor.optim.optimizer_impl=bitsandbytes.optim \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${param_offload} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${optimizer_offload} \
     actor_rollout_ref.actor.fsdp_config.model_dtype=${actor_model_dtype} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
@@ -296,7 +302,7 @@ fi
     actor_rollout_ref.rollout.val_kwargs.do_sample=False \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.max_tokens=${max_response_length} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
+    actor_rollout_ref.ref.fsdp_config.param_offload=${param_offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} \
     actor_rollout_ref.ref.fsdp_config.fsdp_size=${fsdp_size} \
