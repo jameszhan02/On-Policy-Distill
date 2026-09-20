@@ -58,8 +58,8 @@ clip_ratio_high=0.28
 opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-2.0}
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-256}
-max_response_length=${MAX_RESPONSE_LENGTH:-608}
-student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-896}
+max_response_length=${MAX_RESPONSE_LENGTH:-512}
+student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-768}
 
 if (( student_max_seq_len < max_prompt_length + max_response_length )); then
     echo "STUDENT_MAX_SEQ_LEN (${student_max_seq_len}) must cover prompt + response" \

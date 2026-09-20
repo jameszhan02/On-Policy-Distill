@@ -179,13 +179,38 @@ r1_zero
 
 ```bash
 R1_ZERO_MODE=1 \
-ENABLE_ACTIVATION_OFFLOAD=True
+ENABLE_ACTIVATION_OFFLOAD=True \
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/train.parquet \
 TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/val_small.parquet \
-MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
+MODEL_PATH=/data/shared_ckpt/opd_student \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```
+
+For the 24 GiB single-GPU OLMo teacher + OLMo student setup, start with
+`MAX_RESPONSE_LENGTH=576` and `STUDENT_MAX_SEQ_LEN=832`. The latter is the
+complete sequence budget: `256` prompt tokens + `576` response tokens = `832`.
+The smoke script derives the actor/log-prob/vLLM token budgets from
+`STUDENT_MAX_SEQ_LEN`, so setting both variables keeps generation and training
+limits consistent. If this still OOMs on a long-response batch, use the safer
+`MAX_RESPONSE_LENGTH=512` and `STUDENT_MAX_SEQ_LEN=768` pair. Do not reduce
+`STUDENT_MAX_SEQ_LEN` below prompt + response length.
+
+Sequence length affects backward memory because training must retain or
+recompute per-token activations for gradient calculation. Attention workspaces
+also grow with sequence length, and the language-model head produces logits
+for every response token across the full vocabulary. Consequently, one long
+sample can set the peak even when the batch's mean response length is small.
+Gradient checkpointing and activation offload reduce the retained activation
+cost, but they do not remove these per-token backward temporaries. This is why
+a run can complete several short steps and then OOM when a later batch contains
+a response close to the configured maximum.
+
+Reducing the response cap changes the training data distribution: more
+responses may be clipped before their final answer. Watch `responses clipped`
+and `missing final answer`; if those become too high, the durable solution is
+to move the teacher to another GPU or release/offload it during student
+backward rather than continuing to shorten responses.
 
 ```bash
 ## teacher rollout test
