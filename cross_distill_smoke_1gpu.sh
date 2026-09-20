@@ -58,8 +58,8 @@ clip_ratio_high=0.28
 opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-2.0}
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-256}
-max_response_length=${MAX_RESPONSE_LENGTH:-512}
-student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-768}
+max_response_length=${MAX_RESPONSE_LENGTH:-384}
+student_max_seq_len=${STUDENT_MAX_SEQ_LEN:-640}
 
 if (( student_max_seq_len < max_prompt_length + max_response_length )); then
     echo "STUDENT_MAX_SEQ_LEN (${student_max_seq_len}) must cover prompt + response" \
@@ -73,7 +73,7 @@ loss_agg_mode="token-mean"
 # to the rollout batch so each rollout produces one genuinely on-policy
 # optimizer step. Dynamic token batching still splits the forward/backward
 # work into memory-safe micro-batches on the single GPU.
-train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-32}
+train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-16}
 n_resp_per_prompt=${N_RESP_PER_PROMPT:-1}
 train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-${train_prompt_bsz}}
 
@@ -188,7 +188,7 @@ enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD:-False}
 # sequences generate together -- watch for vLLM OOM (this shares the GPU with
 # the teacher process per the smoke-test setup) and lower this first, before
 # touching train_prompt_bsz or gpu_memory_utilization, if it OOMs.
-max_num_seqs=${MAX_NUM_SEQS:-4}
+max_num_seqs=${MAX_NUM_SEQS:-2}
 rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
 # vLLM's batched-token scheduling budget must cover max_num_seqs sequences
 # concurrently, not just one -- scale it with max_num_seqs instead of leaving
