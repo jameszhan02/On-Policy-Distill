@@ -88,7 +88,7 @@ fi
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-1000}
+total_training_steps=${TOTAL_TRAINING_STEPS:-1500}
 test_freq=${TEST_FREQ:-200}
 save_freq=${SAVE_FREQ:-200}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
