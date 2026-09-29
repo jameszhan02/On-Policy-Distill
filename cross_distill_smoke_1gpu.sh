@@ -55,7 +55,7 @@ kl_loss_coef=${KL_LOSS_COEF:-0.0}
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
-opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-2.0}
+opd_loss_max_clamp=${OPD_LOSS_MAX_CLAMP:-10.0} # this is control over the clip
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-256}
 max_response_length=${MAX_RESPONSE_LENGTH:-608}
@@ -73,7 +73,7 @@ loss_agg_mode="token-mean"
 # to the rollout batch so each rollout produces one genuinely on-policy
 # optimizer step. Dynamic token batching still splits the forward/backward
 # work into memory-safe micro-batches on the single GPU.
-train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-16}
+train_prompt_bsz=${TRAIN_PROMPT_BATCH_SIZE:-32}
 n_resp_per_prompt=${N_RESP_PER_PROMPT:-1}
 train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-${train_prompt_bsz}}
 
@@ -88,7 +88,7 @@ fi
 # Debug defaults: run a short, observable experiment before committing to a
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
-total_training_steps=${TOTAL_TRAINING_STEPS:-1500}
+total_training_steps=${TOTAL_TRAINING_STEPS:-500}
 test_freq=${TEST_FREQ:-200}
 save_freq=${SAVE_FREQ:-200}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
@@ -99,7 +99,7 @@ val_before_train=${VAL_BEFORE_TRAIN:-True}
 # this script's own default of 32 (a 4x increase), a proportionate but
 # conservative bump is ~2-3x, not the full 5x -- start here and watch
 # grad_norm/entropy/OPD loss for instability before pushing further.
-actor_lr=${ACTOR_LR:-5e-7}
+actor_lr=${ACTOR_LR:-1e-6}
 actor_lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS:-50}
 
 NNODES=${NNODES:-1}
@@ -115,7 +115,7 @@ TEACHER_CKPT_PATH=${TEACHER_CKPT_PATH:-"Qwen/Qwen2.5-0.5B-Instruct"}
 # Override EXP_NAME directly if you want a fixed name regardless of model paths.
 student_tag=$(basename "${MODEL_PATH}")
 teacher_tag=$(basename "${TEACHER_CKPT_PATH}")
-exp_name=${EXP_NAME:-"8_rep_32_to_7"}
+exp_name=${EXP_NAME:-"FINE-TUNE-8-to-1"}
 
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}"}
 
