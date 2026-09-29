@@ -262,6 +262,49 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # Aggregate OPD alignment counters across the whole rollout batch before
+    # dividing. This produces a true per-chunk mean instead of an unweighted
+    # mean of per-sequence means.
+    alignment_keys = {
+        "matched_chunks": "opd_alignment_matched_chunks",
+        "matched_student_tokens": "opd_alignment_matched_student_tokens",
+        "matched_teacher_tokens": "opd_alignment_matched_teacher_tokens",
+        "trainable_chunks": "opd_alignment_trainable_chunks",
+        "trainable_student_tokens": "opd_alignment_trainable_student_tokens",
+        "trainable_teacher_tokens": "opd_alignment_trainable_teacher_tokens",
+        "one_to_one_chunks": "opd_alignment_one_to_one_chunks",
+    }
+    if all(key in batch.non_tensor_batch for key in alignment_keys.values()):
+        totals = {
+            name: float(np.asarray(batch.non_tensor_batch[key], dtype=np.float64).sum())
+            for name, key in alignment_keys.items()
+        }
+        matched_chunks = totals["matched_chunks"]
+        trainable_chunks = totals["trainable_chunks"]
+        metrics.update(
+            {
+                "opd_alignment/matched_chunks": matched_chunks,
+                "opd_alignment/student_tokens_per_matched_chunk": (
+                    totals["matched_student_tokens"] / matched_chunks if matched_chunks else 0.0
+                ),
+                "opd_alignment/teacher_tokens_per_matched_chunk": (
+                    totals["matched_teacher_tokens"] / matched_chunks if matched_chunks else 0.0
+                ),
+                "opd_alignment/one_to_one_ratio": (
+                    totals["one_to_one_chunks"] / matched_chunks if matched_chunks else 0.0
+                ),
+                "opd_alignment/trainable_chunk_ratio": (
+                    trainable_chunks / matched_chunks if matched_chunks else 0.0
+                ),
+                "opd_alignment/student_tokens_per_trainable_chunk": (
+                    totals["trainable_student_tokens"] / trainable_chunks if trainable_chunks else 0.0
+                ),
+                "opd_alignment/teacher_tokens_per_trainable_chunk": (
+                    totals["trainable_teacher_tokens"] / trainable_chunks if trainable_chunks else 0.0
+                ),
+            }
+        )
+
     return metrics
 
 

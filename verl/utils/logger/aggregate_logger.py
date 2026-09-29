@@ -35,6 +35,13 @@ _METRIC_DESCRIPTIONS = {
     "actor/pg_clipfrac_lower": "fraction clipped by lower dual bound",
     "actor/opd_inf_tokens": "teacher/alignment tokens skipped by OPD",
     "actor/opd_inf_ratio": "fraction of OPD response tokens skipped",
+    "opd_alignment/matched_chunks": "text-matched chunks in this rollout batch",
+    "opd_alignment/student_tokens_per_matched_chunk": "mean student tokens per matched chunk",
+    "opd_alignment/teacher_tokens_per_matched_chunk": "mean teacher tokens per matched chunk",
+    "opd_alignment/one_to_one_ratio": "fraction of matched chunks with 1:1 tokenization",
+    "opd_alignment/trainable_chunk_ratio": "fraction of matched chunks retained for OPD training",
+    "opd_alignment/student_tokens_per_trainable_chunk": "mean student tokens per trainable chunk",
+    "opd_alignment/teacher_tokens_per_trainable_chunk": "mean teacher tokens per trainable chunk",
     "critic/score/mean": "teacher response log-prob sum; length-dependent",
     "critic/mean_token_score/mean": "teacher response log-prob per valid token",
     "critic/advantages/mean": "raw teacher signal before OPD loss transform",
@@ -57,7 +64,7 @@ _METRIC_DESCRIPTIONS = {
 
 _SECTION_RULES = (
     ("Optimization", ("actor/",)),
-    ("Teacher / OPD signal", ("critic/",)),
+    ("Teacher / OPD signal", ("critic/", "opd_alignment/")),
     ("Sequence lengths", ("response_length/", "response_length_non_aborted/", "response/", "prompt_length/")),
     ("Performance", ("perf/",)),
     ("Timing (seconds)", ("timing_s/",)),
@@ -75,6 +82,11 @@ _DEBUG_METRICS = (
     ("actor/entropy", "student entropy"),
     ("critic/mean_token_score/mean", "teacher logp/token"),
     ("actor/opd_inf_ratio", "OPD skipped"),
+    ("opd_alignment/matched_chunks", "matched chunks"),
+    ("opd_alignment/student_tokens_per_matched_chunk", "student tokens/matched chunk"),
+    ("opd_alignment/teacher_tokens_per_matched_chunk", "teacher tokens/matched chunk"),
+    ("opd_alignment/one_to_one_ratio", "1:1 matched chunks"),
+    ("opd_alignment/trainable_chunk_ratio", "trainable matched chunks"),
     ("response/format_valid_ratio", "format valid"),
     ("response/answer_correct_ratio", "answer correct"),
     ("response/strict_correct_ratio", "strict correct"),
@@ -91,6 +103,8 @@ _DEBUG_METRICS = (
 
 _DEBUG_PERCENT_METRICS = {
     "actor/opd_inf_ratio",
+    "opd_alignment/one_to_one_ratio",
+    "opd_alignment/trainable_chunk_ratio",
     "response/format_valid_ratio",
     "response/answer_correct_ratio",
     "response/strict_correct_ratio",

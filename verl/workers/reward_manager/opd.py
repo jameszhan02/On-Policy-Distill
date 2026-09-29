@@ -181,6 +181,7 @@ class TeacherClient:
         self.student_tokenizer = None
         self._same_tokenizer = None  # cached result of tokenizer comparison
         self._tokenizer_debug_printed = False
+        self.last_alignment_stats = []
         self._run()
 
     @staticmethod
@@ -703,11 +704,12 @@ class TeacherClient:
                 consecutive replacement characters). Default=6.
 
         Returns:
-            (aligned, chunk_ids, chunk_details, teacher_truncated) where:
+            (aligned, chunk_ids, chunk_details, teacher_truncated, alignment_stats) where:
                 aligned: Tensor [len(student_ids)], aligned logprobs for each student token
                 chunk_ids: Tensor [len(student_ids)], same ID for student tokens in a synchronized chunk
                 chunk_details: list of dicts with per-chunk info (only populated when debug=True)
                 teacher_truncated: bool, True if teacher ran out before student
+                alignment_stats: lightweight matched/trainable chunk counters
         """
         n_stu = len(student_ids)
         n_tec = len(teacher_ids)
@@ -716,9 +718,18 @@ class TeacherClient:
 
         chunk_details = []  # per-chunk info for debug
         teacher_truncated = False  # True iff teacher tokens ran out while student still had content
+        alignment_stats = {
+            "matched_chunks": 0,
+            "matched_student_tokens": 0,
+            "matched_teacher_tokens": 0,
+            "trainable_chunks": 0,
+            "trainable_student_tokens": 0,
+            "trainable_teacher_tokens": 0,
+            "one_to_one_chunks": 0,
+        }
 
         if n_stu == 0 or n_tec == 0:
-            return aligned, chunk_ids, chunk_details, teacher_truncated
+            return aligned, chunk_ids, chunk_details, teacher_truncated, alignment_stats
 
         s_ptr = 0  # next student token to consume
         t_ptr = 0  # next teacher token to consume
@@ -744,6 +755,9 @@ class TeacherClient:
                     n_stu_tokens = s_end - s_ptr
                     n_tec_tokens = t_end - t_ptr
                     chunk_logp = teacher_logps[t_ptr:t_end].sum()
+                    alignment_stats["matched_chunks"] += 1
+                    alignment_stats["matched_student_tokens"] += n_stu_tokens
+                    alignment_stats["matched_teacher_tokens"] += n_tec_tokens
                     # Mark large chunks as inf sentinel \u2014 these are typically
                     # consecutive U+FFFD (garbled output) runs where the averaged
                     # teacher logprob is unreliable. Treated same as fallback:
@@ -753,6 +767,9 @@ class TeacherClient:
                     else:
                         aligned[s_ptr:s_end] = chunk_logp / n_stu_tokens
                         chunk_ids[s_ptr:s_end] = _chunk_count
+                        alignment_stats["trainable_chunks"] += 1
+                        alignment_stats["trainable_student_tokens"] += n_stu_tokens
+                        alignment_stats["trainable_teacher_tokens"] += n_tec_tokens
                     # if debug and not (n_stu_tokens == 1 and (t_end - t_ptr) == 1):
                     #     s_repr = repr(s_text)
                     #     print(f"  [multi-chunk {_chunk_count}] stu[{s_ptr}:{s_end}]({n_stu_tokens}t) <-> tec[{t_ptr}:{t_end}]({t_end-t_ptr}t)  "
@@ -791,6 +808,7 @@ class TeacherClient:
                         })
                     if n_stu_tokens == 1 and (t_end - t_ptr) == 1:
                         _one_to_one += 1
+                        alignment_stats["one_to_one_chunks"] += 1
                     else:
                         _multi_chunks += 1
                         _multi_stu_tokens += n_stu_tokens
@@ -958,7 +976,8 @@ class TeacherClient:
                         for ti, tid, tlogp, ttxt in tec_toks:
                             print(f"      tec[{ti}] id={tid:>6d}  logp={tlogp:.4f}  {repr(ttxt)}")
 
-        return aligned, chunk_ids, chunk_details, teacher_truncated
+        return aligned, chunk_ids, chunk_details, teacher_truncated, alignment_stats
+
     def bg_task(self):
         socket = self.context.socket(zmq.REQ)
         socket.connect(f"tcp://{self.server_ip}:{self.server_port}")
@@ -1198,6 +1217,18 @@ class TeacherClient:
             # nested function (handle_futures), which breaks the retry loop above: it reads
             # `batch_size` before this line ever runs, raising UnboundLocalError on any retry.
             local_batch_size = attention_mask.size(0)
+            alignment_stats = [
+                {
+                    "matched_chunks": 0,
+                    "matched_student_tokens": 0,
+                    "matched_teacher_tokens": 0,
+                    "trainable_chunks": 0,
+                    "trainable_student_tokens": 0,
+                    "trainable_teacher_tokens": 0,
+                    "one_to_one_chunks": 0,
+                }
+                for _ in range(local_batch_size)
+            ]
 
             # ---- Dump control ----
             global _dump_step_counter
@@ -1225,6 +1256,16 @@ class TeacherClient:
                     teacher_chunk_ids_padded[i, valid_pos[1:1+n_fill]] = torch.arange(
                         n_fill, dtype=torch.float32
                     )
+                    response_tokens = int(batch.batch["response_mask"][i].sum().item())
+                    alignment_stats[i] = {
+                        "matched_chunks": response_tokens,
+                        "matched_student_tokens": response_tokens,
+                        "matched_teacher_tokens": response_tokens,
+                        "trainable_chunks": response_tokens,
+                        "trainable_student_tokens": response_tokens,
+                        "trainable_teacher_tokens": response_tokens,
+                        "one_to_one_chunks": response_tokens,
+                    }
 
                     # Dump for same-tokenizer case
                     if i < dump_num:
@@ -1245,6 +1286,7 @@ class TeacherClient:
                             ],
                             "teacher_logps_sample": logps[:50].tolist(),
                         })
+                self.last_alignment_stats = alignment_stats
                 return torch.cat(
                     [teacher_topk_logps_padded, teacher_chunk_ids_padded.to(teacher_topk_logps_padded.dtype)],
                     dim=-1,
@@ -1498,11 +1540,22 @@ class TeacherClient:
 
                 # --- Step B: Chunk-level greedy alignment on response text ---
                 _do_dump_this_seq = (i < dump_num)
-                aligned_logps, aligned_chunk_ids, seq_chunk_details, teacher_truncated = self._align_chunks(
-                    student_resp_ids, teacher_resp_ids, teacher_resp_logps,
-                    student_tokenizer, teacher_tokenizer, debug=_do_dump_this_seq,
-                    large_chunk_threshold=self.large_chunk_threshold
+                (
+                    aligned_logps,
+                    aligned_chunk_ids,
+                    seq_chunk_details,
+                    teacher_truncated,
+                    seq_alignment_stats,
+                ) = self._align_chunks(
+                    student_resp_ids,
+                    teacher_resp_ids,
+                    teacher_resp_logps,
+                    student_tokenizer,
+                    teacher_tokenizer,
+                    debug=_do_dump_this_seq,
+                    large_chunk_threshold=self.large_chunk_threshold,
                 )
+                alignment_stats[i] = seq_alignment_stats
 
                 # --- Dump alignment details ---
                 if _do_dump_this_seq:
@@ -1617,6 +1670,11 @@ class TeacherClient:
                 # Fallback-induced inf holes (mid-sequence) are handled token-wise in
                 # core_algos (torch.where), so we DON'T blow away the whole seq here.
                 if teacher_truncated:
+                    # This sequence is skipped in full below, so none of its
+                    # text-matched chunks is trainable for this step.
+                    alignment_stats[i]["trainable_chunks"] = 0
+                    alignment_stats[i]["trainable_student_tokens"] = 0
+                    alignment_stats[i]["trainable_teacher_tokens"] = 0
                     teacher_topk_logps_padded[i, :] = float('inf')
                     teacher_chunk_ids_padded[i, :] = -1.0
                     warnings.warn(
@@ -1675,6 +1733,7 @@ class TeacherClient:
                         teacher_topk_logps_padded[i, remaining_positions] = float('inf')
                         teacher_chunk_ids_padded[i, remaining_positions] = -1.0
 
+            self.last_alignment_stats = alignment_stats
             return torch.cat(
                 [teacher_topk_logps_padded, teacher_chunk_ids_padded.to(teacher_topk_logps_padded.dtype)],
                 dim=-1,
@@ -1824,6 +1883,9 @@ class OPDRewardManager(AbstractRewardManager):
             reward = reward_tensor
         else:
             reward = self.teacher_client.get_teacher_knowledge(data, False, self.tokenizer)
+            for stats in self.teacher_client.last_alignment_stats:
+                for key, value in stats.items():
+                    reward_extra_info[f"opd_alignment_{key}"].append(value)
         # breakpoint()
 
         if return_dict:
