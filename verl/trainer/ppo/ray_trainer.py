@@ -26,6 +26,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from pprint import pprint
 from typing import Optional
 
@@ -69,8 +70,15 @@ from verl.utils.tracking import ValidationGenerationsLogger
 # r1_zero response is (wrongly) reported as missing_marker/incorrect here,
 # even when the model's <answer> tag matches the ground truth.
 _R1_ZERO_MODE = os.environ.get("R1_ZERO_MODE", "0").strip() == "1"
+_OPD_PROMPT_BRIDGE_MODE = os.environ.get("OPD_PROMPT_BRIDGE_MODE", "").strip().lower()
+_GSM8K_EVAL_PROMPT_TYPE = os.environ.get(
+    "VERL_GSM8K_EVAL_PROMPT_TYPE",
+    "r1_zero" if (_R1_ZERO_MODE or _OPD_PROMPT_BRIDGE_MODE) else "instruct",
+).strip().lower()
 _GSM8K_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 _GSM8K_NUMBER_RE = re.compile(_GSM8K_NUMBER)
+_GSM8K_NUMBER_OR_FRAC = r"-?(?:\d[\d,]*)(?:\.\d+)?(?:\s*/\s*-?\d[\d,]*)?"
+_GSM8K_NUMBER_OR_FRAC_RE = re.compile(_GSM8K_NUMBER_OR_FRAC)
 _GSM8K_STRICT_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})[ \t]*\Z")
 _GSM8K_MARKER_FINAL_RE = re.compile(rf"(?:^|\n)[ \t]*####[ \t]*({_GSM8K_NUMBER})(?P<trailing>[\s\S]*)\Z")
 _R1_ZERO_ANSWER_TAG_RE = re.compile(rf"<answer>\s*({_GSM8K_NUMBER})\s*</answer>", re.IGNORECASE)
@@ -87,13 +95,154 @@ def _gsm8k_numbers_equal(left, right) -> bool:
     left = str(left).replace(",", "").strip()
     right = str(right).replace(",", "").strip()
     try:
+        return Fraction(left) == Fraction(right)
+    except (InvalidOperation, ValueError, ZeroDivisionError):
+        pass
+    try:
         return Decimal(left) == Decimal(right)
     except InvalidOperation:
         return left == right
 
 
-def _classify_gsm8k_response(response: str, ground_truth) -> dict:
-    """Diagnose the final-answer format separately from answer correctness."""
+def _gsm8k_answer_equal(prediction, ground_truth) -> bool:
+    if isinstance(ground_truth, (list, tuple)):
+        return any(_gsm8k_numbers_equal(prediction, item) for item in ground_truth)
+    return _gsm8k_numbers_equal(prediction, ground_truth)
+
+
+def _extract_last_number(response: str):
+    matches = _GSM8K_NUMBER_OR_FRAC_RE.findall(response)
+    if not matches:
+        return None
+    return matches[-1].replace(" ", "")
+
+
+def _extract_boxed_answer(response: str):
+    marker = "\\boxed{"
+    start = response.rfind(marker)
+    if start == -1:
+        return None
+    idx = start + len(marker)
+    depth = 1
+    chars = []
+    while idx < len(response):
+        ch = response[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return "".join(chars).strip()
+        chars.append(ch)
+        idx += 1
+    return None
+
+
+def _extract_instruct_answer(response: str):
+    if "\\boxed" in response:
+        boxed = _extract_boxed_answer(response)
+        if boxed is not None:
+            return boxed
+
+    normalized = (
+        response.replace("<|eot_id|>", "")
+        .replace("<|endoftext|>", "")
+        .replace("<|end_of_text|>", "")
+    )
+    answer_markers = [
+        rf"####\s*(?P<answer>{_GSM8K_NUMBER_OR_FRAC})",
+        rf"(?:final\s+answer|answer)\s*(?:is|:)\s*\$?\s*(?P<answer>{_GSM8K_NUMBER_OR_FRAC})",
+    ]
+    for pattern in answer_markers:
+        matches = list(re.finditer(pattern, normalized, flags=re.IGNORECASE))
+        if matches:
+            return matches[-1].group("answer").replace(" ", "")
+    return _extract_last_number(normalized)
+
+
+def _lllm_r1_zero_grade(response: str, ground_truth) -> dict:
+    """Mirror lllm's r1_zero_finegrained_reward_fn for rollout diagnostics."""
+    stripped = response.strip()
+    marker_count = stripped.count("<answer>")
+    has_all_tags = all(tok in response for tok in ["<think>", "</think>", "<answer>", "</answer>"])
+    stopped = any(stripped.endswith(tok) for tok in ["<|endoftext|>", "<|end_of_text|>", "<|eot_id|>"])
+
+    format_reward = 0.0
+    if has_all_tags:
+        format_reward += 0.2
+        if stopped:
+            format_reward += 0.3
+            if stripped.startswith("<think>") and "</think> <answer>" in response:
+                format_reward += 0.2
+                if all(response.count(tok) == 1 for tok in ["<think>", "</think>", "<answer>", "</answer>"]):
+                    format_reward += 0.1
+                    if response.find("</think>") - response.find("<think>") >= 20:
+                        format_reward += 0.1
+                    empty_patterns = [
+                        "<think> </think>",
+                        "<think></think>",
+                        "<answer> </answer>",
+                        "<answer></answer>",
+                        "<think> reasoning process here </think>",
+                    ]
+                    if all(response.count(tok) == 0 for tok in empty_patterns):
+                        format_reward += 0.1
+    if response.count("<think> reasoning process here </think>"):
+        format_reward = 0.0
+
+    prediction = None
+    answer_reward = 0.0
+    if "</think> <answer>" in response and "</answer>" in response:
+        prediction = response.split("<answer>")[-1].replace("</answer>", "")
+        boxed = _extract_boxed_answer(prediction) if "\\boxed" in prediction else None
+        if boxed is not None:
+            prediction = boxed
+        answer_reward = 1.0 if _gsm8k_answer_equal(prediction, ground_truth) else 0.0
+
+    if marker_count > 1:
+        failure = "multiple_markers"
+    elif prediction is not None:
+        failure = None if answer_reward else "wrong_answer"
+    elif marker_count == 0:
+        failure = "missing_marker"
+    else:
+        failure = "missing_number_after_marker"
+
+    return {
+        "eval_prompt_type": "r1_zero",
+        "format_reward": format_reward,
+        "answer_reward": answer_reward,
+        "reward": format_reward if answer_reward else 0.0,
+        "format_valid": format_reward > 0.0,
+        "marker_count": marker_count,
+        "extracted_answer": prediction.strip() if isinstance(prediction, str) else prediction,
+        "answer_correct": answer_reward == 1.0,
+        "strict_correct": answer_reward == 1.0 and format_reward > 0.0,
+        "format_failure": failure,
+    }
+
+
+def _lllm_instruct_grade(response: str, ground_truth) -> dict:
+    """Mirror lllm's _instruct_reward_fn answer extraction."""
+    prediction = _extract_instruct_answer(response)
+    answer_reward = 1.0 if _gsm8k_answer_equal(prediction, ground_truth) else 0.0
+    format_reward = 1.0 if prediction is not None else 0.0
+    return {
+        "eval_prompt_type": "instruct",
+        "format_reward": format_reward,
+        "answer_reward": answer_reward,
+        "reward": answer_reward,
+        "format_valid": format_reward == 1.0,
+        "marker_count": response.count("####"),
+        "extracted_answer": prediction,
+        "answer_correct": answer_reward == 1.0,
+        "strict_correct": answer_reward == 1.0 and format_reward == 1.0,
+        "format_failure": None if prediction is not None else "missing_marker",
+    }
+
+
+def _classify_legacy_gsm8k_response(response: str, ground_truth) -> dict:
+    """Original strict ####/R1 diagnostic, kept as a fallback option."""
     stripped = response.strip()
 
     if _R1_ZERO_MODE:
@@ -111,8 +260,12 @@ def _classify_gsm8k_response(response: str, ground_truth) -> dict:
         else:
             failure = "missing_number_after_marker"
 
-        loose_correct = _gsm8k_numbers_equal(prediction, ground_truth)
+        loose_correct = _gsm8k_answer_equal(prediction, ground_truth)
         return {
+            "eval_prompt_type": "legacy_r1_zero",
+            "format_reward": 1.0 if format_valid else 0.0,
+            "answer_reward": 1.0 if loose_correct else 0.0,
+            "reward": 1.0 if (format_valid and loose_correct) else 0.0,
             "format_valid": format_valid,
             "marker_count": marker_count,
             "extracted_answer": prediction,
@@ -148,16 +301,31 @@ def _classify_gsm8k_response(response: str, ground_truth) -> dict:
     else:
         failure = "trailing_or_nonfinal_text"
 
-    loose_correct = _gsm8k_numbers_equal(prediction, ground_truth)
+    loose_correct = _gsm8k_answer_equal(prediction, ground_truth)
     strict_prediction = strict_match.group(1) if strict_match is not None else None
     return {
+        "eval_prompt_type": "legacy_instruct",
+        "format_reward": 1.0 if format_valid else 0.0,
+        "answer_reward": 1.0 if loose_correct else 0.0,
+        "reward": 1.0 if (format_valid and loose_correct) else 0.0,
         "format_valid": format_valid,
         "marker_count": marker_count,
         "extracted_answer": prediction,
         "answer_correct": loose_correct,
-        "strict_correct": format_valid and _gsm8k_numbers_equal(format_prediction, ground_truth),
+        "strict_correct": format_valid and _gsm8k_answer_equal(format_prediction, ground_truth),
         "format_failure": failure,
     }
+
+
+def _classify_gsm8k_response(response: str, ground_truth) -> dict:
+    """Diagnose rollout answers using the same prompt-type convention as lllm eval."""
+    if _GSM8K_EVAL_PROMPT_TYPE in {"r1_zero", "r1_zero_three_shot_gsm8k"}:
+        return _lllm_r1_zero_grade(response, ground_truth)
+    if _GSM8K_EVAL_PROMPT_TYPE in {"instruct", "plain_question_only", "question_only"}:
+        return _lllm_instruct_grade(response, ground_truth)
+    if _GSM8K_EVAL_PROMPT_TYPE == "legacy":
+        return _classify_legacy_gsm8k_response(response, ground_truth)
+    return _lllm_instruct_grade(response, ground_truth)
 
 
 @dataclass
@@ -645,9 +813,12 @@ class RayPPOTrainer:
                 diagnosis = diagnoses[sample_idx]
                 print(
                     "[answer check] "
+                    f"eval_prompt_type={diagnosis['eval_prompt_type']} "
                     f"format_valid={diagnosis['format_valid']} "
+                    f"format_reward={diagnosis['format_reward']:.3g} "
                     f"markers={diagnosis['marker_count']} "
                     f"prediction={diagnosis['extracted_answer']} "
+                    f"answer_reward={diagnosis['answer_reward']:.3g} "
                     f"correct={diagnosis['answer_correct']} "
                     f"failure={diagnosis['format_failure']} "
                     f"eos={diagnosis['eos_generated']} "
@@ -663,6 +834,10 @@ class RayPPOTrainer:
                 "answer_correct",
                 "strict_correct",
                 "format_failure",
+                "eval_prompt_type",
+                "format_reward",
+                "answer_reward",
+                "reward",
                 "eos_generated",
                 "eos_teacher_supervised",
             ):
@@ -689,6 +864,9 @@ class RayPPOTrainer:
                 "response/format_valid_ratio": sum(item["format_valid"] for item in diagnoses) / count,
                 "response/answer_correct_ratio": sum(item["answer_correct"] for item in diagnoses) / count,
                 "response/strict_correct_ratio": sum(item["strict_correct"] for item in diagnoses) / count,
+                "response/lllm_format_reward": sum(item["format_reward"] for item in diagnoses) / count,
+                "response/lllm_answer_reward": sum(item["answer_reward"] for item in diagnoses) / count,
+                "response/lllm_reward": sum(item["reward"] for item in diagnoses) / count,
                 "response/missing_final_answer_ratio": sum(
                     item["format_failure"] in {"missing_marker", "missing_number_after_marker"}
                     for item in diagnoses
