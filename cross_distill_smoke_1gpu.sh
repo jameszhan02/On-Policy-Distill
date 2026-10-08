@@ -157,6 +157,11 @@ export OPD_DUMP_DIR=${OPD_DUMP_DIR:-"/tmp/opd_dumps"}
 export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
 export OPD_DUMP_MAX_STEPS=${OPD_DUMP_MAX_STEPS:-"3"}
 export OPD_TOKENIZER_DEBUG=${OPD_TOKENIZER_DEBUG:-"1"}
+# Optional prompt bridge for teachers evaluated with lllm's Alpaca+r1_zero
+# prompt, e.g. OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1.
+export OPD_PROMPT_BRIDGE_MODE=${OPD_PROMPT_BRIDGE_MODE:-""}
+export OPD_TEACHER_SYSTEM_PROMPT_PATH=${OPD_TEACHER_SYSTEM_PROMPT_PATH:-""}
+export OPD_TEACHER_PROMPT_PATH=${OPD_TEACHER_PROMPT_PATH:-""}
 
 # Keep the terminal useful during debugging: show one student rollout and only
 # the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.

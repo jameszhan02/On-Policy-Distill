@@ -180,9 +180,9 @@ r1_zero
 ```bash
 R1_ZERO_MODE=1 \
 ENABLE_ACTIVATION_OFFLOAD=True \
-TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/train.parquet \
-TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k_r1zero/val_small.parquet \
-MODEL_PATH=/data/shared_ckpt/Llama-3.2-1B-Instruct \
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small.parquet \
+MODEL_PATH=/data/shared_ckpt/llama32-1b-loosepacked_4ep_20260807_233449/hf_ckpts/step_0002400 \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 bash cross_distill_smoke_1gpu.sh
 ```

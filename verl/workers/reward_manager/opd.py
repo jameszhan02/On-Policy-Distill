@@ -27,6 +27,7 @@ import os
 import json
 import time
 import queue
+import re
 import threading
 import concurrent.futures
 import unicodedata
@@ -76,6 +77,19 @@ DEBUG = False
 # this mode, so retokenize_batch and the response-boundary detection take a
 # separate, simpler path gated on this flag instead.
 R1_ZERO_MODE = os.environ.get("R1_ZERO_MODE", "0").strip() == "1"
+OPD_PROMPT_BRIDGE_MODE = os.environ.get("OPD_PROMPT_BRIDGE_MODE", "").strip().lower()
+
+_DEFAULT_ALPACA_SYSTEM_PROMPT = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+{instruction}
+
+### Response:
+"""
+
+_DEFAULT_R1_FOR_ALPACA_PROMPT = """A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
+
+{question}"""
 
 # ---- Alignment dump configuration (controlled by environment variables) ----
 # OPD_DUMP_DIR: directory to write alignment debug dumps (disabled if unset/empty)
@@ -182,6 +196,17 @@ class TeacherClient:
         self._same_tokenizer = None  # cached result of tokenizer comparison
         self._tokenizer_debug_printed = False
         self.last_alignment_stats = []
+        self.prompt_bridge_mode = OPD_PROMPT_BRIDGE_MODE
+        self._bridge_teacher_system_prompt = self._load_prompt_template_from_env(
+            "OPD_TEACHER_SYSTEM_PROMPT_PATH",
+            "OPD_TEACHER_SYSTEM_PROMPT",
+            _DEFAULT_ALPACA_SYSTEM_PROMPT,
+        )
+        self._bridge_teacher_prompt = self._load_prompt_template_from_env(
+            "OPD_TEACHER_PROMPT_PATH",
+            "OPD_TEACHER_PROMPT",
+            _DEFAULT_R1_FOR_ALPACA_PROMPT,
+        )
         self._run()
 
     @staticmethod
@@ -201,6 +226,25 @@ class TeacherClient:
         logps = [torch.full((1, 1), float("inf"), dtype=torch.float32) for _ in range(num_samples)]
         indices = [torch.zeros((1, 1), dtype=torch.long) for _ in range(num_samples)]
         return responses, logps, indices
+
+    @staticmethod
+    def _load_prompt_template_from_env(path_env: str, text_env: str, default: str) -> str:
+        """Load an OPD bridge prompt template from a path env, literal env, or default."""
+        path = os.environ.get(path_env, "").strip()
+        if path:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        text = os.environ.get(text_env)
+        if text is not None:
+            return text
+        return default
+
+    def _uses_prompt_bridge(self) -> bool:
+        return self.prompt_bridge_mode in {
+            "alpaca_to_alpaca_r1",
+            "alpaca_to_r1_alpaca",
+            "lllm_alpaca_r1",
+        }
 
     def _is_same_tokenizer(self):
         """Check if teacher and student tokenizers have the same vocabulary. Result is cached."""
@@ -357,6 +401,7 @@ class TeacherClient:
         same_tokenizer = self._is_same_tokenizer()
         print("\n=== OPD tokenizer / mapping detection ===", flush=True)
         print(f"[mode] R1_ZERO_MODE={R1_ZERO_MODE}", flush=True)
+        print(f"[mode] OPD_PROMPT_BRIDGE_MODE={self.prompt_bridge_mode or '<off>'}", flush=True)
         for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
             print(f"[{label}] name_or_path={tokenizer.name_or_path}", flush=True)
             print(f"[{label}] class={tokenizer.__class__.__name__}", flush=True)
@@ -398,7 +443,17 @@ class TeacherClient:
             )
 
         print(f"[mapping] vocabularies_identical={same_tokenizer}", flush=True)
-        if same_tokenizer:
+        if self._uses_prompt_bridge():
+            print("[mapping] selected_route=prompt_bridge_alpaca_to_alpaca_r1", flush=True)
+            print(
+                f"[mapping] teacher_system_prompt={self._compact_template(self._bridge_teacher_system_prompt)}",
+                flush=True,
+            )
+            print(
+                f"[mapping] teacher_prompt={self._compact_template(self._bridge_teacher_prompt)}",
+                flush=True,
+            )
+        elif same_tokenizer:
             print("[mapping] selected_route=same_tokenizer_direct_shift", flush=True)
         else:
             student_family = self._detect_model_family(self.student_tokenizer)
@@ -588,6 +643,88 @@ class TeacherClient:
                     teacher_text = teacher_text.replace(tok, teacher_eos)
         return teacher_text
 
+    def _strip_student_bos(self, text: str) -> str:
+        student_bos = self.student_tokenizer.bos_token or ""
+        if student_bos and text.startswith(student_bos):
+            return text[len(student_bos):]
+        return text
+
+    def _strip_student_terminal(self, text: str):
+        """Return response text without a trailing student terminal token."""
+        student_bos = self.student_tokenizer.bos_token or ""
+        candidates = []
+        if self.student_tokenizer.eos_token:
+            candidates.append(self.student_tokenizer.eos_token)
+        for extra in getattr(self.student_tokenizer, "additional_special_tokens", None) or []:
+            if extra and extra != student_bos and extra not in candidates:
+                candidates.append(extra)
+        candidates.sort(key=len, reverse=True)
+        for tok in candidates:
+            if text.endswith(tok):
+                return text[:-len(tok)], True
+        return text, False
+
+    @staticmethod
+    def _normalize_bridge_question(instruction: str) -> str:
+        """Recover the raw GSM8K question from common OPD smoke prompt suffixes."""
+        question = instruction.strip()
+        suffix_patterns = [
+            r"\s+Let's think step by step and output the final answer after [\"“]?####[\"”]?\.\s*$",
+            r"\s+Give the final answer in the form #### number\.\s*$",
+            r"\s+Please give the final answer in the form #### number\.\s*$",
+            r"\s+Output the final answer after [\"“]?####[\"”]?\.\s*$",
+        ]
+        for pattern in suffix_patterns:
+            question = re.sub(pattern, "", question, flags=re.IGNORECASE).strip()
+        return question
+
+    def _split_alpaca_prompt(self, student_text: str):
+        """Split an Alpaca-rendered student sequence into instruction and response text."""
+        text = self._strip_student_bos(student_text)
+        response_marker = "\n\n### Response:\n"
+        response_start = text.rfind(response_marker)
+        if response_start == -1:
+            response_marker = "### Response:\n"
+            response_start = text.rfind(response_marker)
+        if response_start == -1:
+            raise ValueError("Cannot find Alpaca response marker '### Response:'")
+
+        prompt_part = text[:response_start]
+        response_text = text[response_start + len(response_marker):]
+
+        instruction_marker = "### Instruction:\n"
+        instruction_start = prompt_part.rfind(instruction_marker)
+        if instruction_start == -1:
+            raise ValueError("Cannot find Alpaca instruction marker '### Instruction:'")
+        instruction = prompt_part[instruction_start + len(instruction_marker):].strip()
+        return instruction, response_text
+
+    def _build_bridge_teacher_prompt(self, student_prompt_text: str) -> str:
+        instruction, _ = self._split_alpaca_prompt(student_prompt_text)
+        question = self._normalize_bridge_question(instruction)
+        teacher_instruction = self._bridge_teacher_prompt.format(
+            question=question,
+            instruction=question,
+        )
+        teacher_prompt = self._bridge_teacher_system_prompt.format(
+            instruction=teacher_instruction,
+            question=question,
+        )
+        teacher_bos = self.tokenizer.bos_token or ""
+        if teacher_bos and not teacher_prompt.startswith(teacher_bos):
+            teacher_prompt = teacher_bos + teacher_prompt
+        return teacher_prompt
+
+    def _bridge_student_text_to_teacher(self, student_text: str) -> str:
+        """Convert Alpaca student text to the lllm Alpaca+r1_zero teacher prompt."""
+        _, response_text = self._split_alpaca_prompt(student_text)
+        teacher_prompt = self._build_bridge_teacher_prompt(student_text)
+        response_text, had_terminal = self._strip_student_terminal(response_text)
+        teacher_eos = self.tokenizer.eos_token or ""
+        if had_terminal and teacher_eos:
+            response_text = response_text + teacher_eos
+        return teacher_prompt + response_text
+
     def retokenize_batch(self, batch):
         """Convert a batch of student token ID sequences to teacher token ID sequences.
 
@@ -600,10 +737,10 @@ class TeacherClient:
         Returns:
             list of list[int], each inner list is the re-encoded sequence in teacher token IDs.
         """
-        if self._is_same_tokenizer():
+        if self._is_same_tokenizer() and not self._uses_prompt_bridge():
             return batch
 
-        if not R1_ZERO_MODE and not hasattr(self, '_template_mapping'):
+        if not R1_ZERO_MODE and not self._uses_prompt_bridge() and not hasattr(self, '_template_mapping'):
             self._template_mapping = self._build_chat_template_mapping()
 
         input_id_list = []
@@ -611,7 +748,9 @@ class TeacherClient:
         for seq_idx in range(len(batch)):
             student_text = self.student_tokenizer.decode(batch[seq_idx], skip_special_tokens=False)
 
-            if R1_ZERO_MODE:
+            if self._uses_prompt_bridge():
+                teacher_text = self._bridge_student_text_to_teacher(student_text)
+            elif R1_ZERO_MODE:
                 # Raw-prompt mode: the prompt content is identical literal text
                 # for both tokenizers (no role markers to translate). The only
                 # difference is each tokenizer's own bos-string prefix and its
@@ -1240,7 +1379,7 @@ class TeacherClient:
             else:
                 dump_num = 0
 
-            if self._is_same_tokenizer():
+            if self._is_same_tokenizer() and not self._uses_prompt_bridge():
                 # Same tokenizer: direct fill, no alignment needed.
                 # teacher_topk_logps[i][k, 0] predicts token at position k+1,
                 # so we shift right by 1: fill [1:] logprobs into positions [1:].
@@ -1306,6 +1445,7 @@ class TeacherClient:
             teacher_tokenizer = self.tokenizer
             student_tokenizer = self.student_tokenizer
 
+            prompt_bridge_mode = self._uses_prompt_bridge()
             if R1_ZERO_MODE:
                 # No chat-template role markers exist to search for in this
                 # mode -- response boundaries are derived directly from the
@@ -1313,6 +1453,14 @@ class TeacherClient:
                 # teacher-side re-encoding of the student's own prompt slice
                 # (teacher side), not from a decoded-text marker search.
                 student_family = teacher_family = "raw"
+                prompt_length = batch.batch["prompts"].shape[-1]
+            elif prompt_bridge_mode:
+                # Student uses an Alpaca-rendered prompt, while the teacher
+                # should score the same response under the lllm eval prompt:
+                # Alpaca outer shell + r1_zero task instruction.  Boundaries
+                # come from the known student prompt length and a teacher-side
+                # re-rendering of that prompt, not from model-family markers.
+                student_family = teacher_family = "alpaca_bridge"
                 prompt_length = batch.batch["prompts"].shape[-1]
             else:
                 # Detect model families for response boundary markers
@@ -1356,7 +1504,7 @@ class TeacherClient:
 
                 # --- Step A: Find response boundaries in both sequences ---
 
-                if R1_ZERO_MODE:
+                if R1_ZERO_MODE or prompt_bridge_mode:
                     # Student: prompt length is already known from the batch
                     # itself -- no marker search needed.
                     student_resp_start_tok = int(attention_mask[i, :prompt_length].sum().item())
@@ -1397,7 +1545,7 @@ class TeacherClient:
                         tok_id = student_tokenizer.convert_tokens_to_ids(special_tok)
                         if isinstance(tok_id, int) and tok_id != student_tokenizer.unk_token_id:
                             student_special_end_ids.add(tok_id)
-                elif student_family in ("deepseek", "raw"):
+                elif student_family in ("deepseek", "raw", "alpaca_bridge"):
                     # DeepSeek, and raw r1_zero mode, have no separate end-of-turn
                     # token distinct from eos (already added above via eos_token_id).
                     pass
@@ -1436,6 +1584,28 @@ class TeacherClient:
                             f"({len(teacher_ids_no_gen)} tok); skipping"
                         )
                         continue
+                elif prompt_bridge_mode:
+                    # Re-render the student's Alpaca prompt into the exact
+                    # teacher prompt shape used by lllm's Alpaca+r1_zero eval.
+                    student_prompt_text = student_tokenizer.decode(
+                        student_ids[:student_resp_start_tok], skip_special_tokens=False
+                    )
+                    try:
+                        teacher_prompt_text = self._build_bridge_teacher_prompt(student_prompt_text)
+                    except ValueError as exc:
+                        warnings.warn(f"[align seq {i}] prompt bridge failed: {exc}; filling zeros")
+                        continue
+                    teacher_resp_start_tok = len(
+                        teacher_tokenizer(teacher_prompt_text, add_special_tokens=False)["input_ids"]
+                    )
+                    teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
+                    if teacher_resp_start_tok >= len(teacher_ids_no_gen):
+                        warnings.warn(
+                            f"[align seq {i}] prompt bridge: teacher prompt re-rendering "
+                            f"({teacher_resp_start_tok} tok) covers the whole teacher sequence "
+                            f"({len(teacher_ids_no_gen)} tok); skipping"
+                        )
+                        continue
                 else:
                     # Teacher: decode full sequence, find last occurrence of response marker
                     teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
@@ -1464,7 +1634,7 @@ class TeacherClient:
                         tok_id = teacher_tokenizer.convert_tokens_to_ids(special_tok)
                         if isinstance(tok_id, int) and tok_id != teacher_tokenizer.unk_token_id:
                             teacher_special_end_ids.add(tok_id)
-                elif teacher_family in ("deepseek", "raw"):
+                elif teacher_family in ("deepseek", "raw", "alpaca_bridge"):
                     # DeepSeek, and raw r1_zero mode, have no separate end-of-turn
                     # token distinct from eos (already added above via eos_token_id).
                     pass
