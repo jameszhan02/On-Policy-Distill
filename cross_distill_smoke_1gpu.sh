@@ -89,8 +89,8 @@ fi
 # full training run. All values can be overridden from the environment.
 total_epochs=${TOTAL_EPOCHS:-10}
 total_training_steps=${TOTAL_TRAINING_STEPS:-500}
-test_freq=${TEST_FREQ:-200}
-save_freq=${SAVE_FREQ:-200}
+test_freq=${TEST_FREQ:-100}
+save_freq=${SAVE_FREQ:-100}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
 # Was 2e-7: the repo's own real-scale config (cross_distill.sh) pairs lr=1e-6
 # with train_prompt_bsz=128 -- a ~5x LR bump for a ~16x batch bump (sub-linear
