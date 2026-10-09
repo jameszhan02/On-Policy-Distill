@@ -162,6 +162,7 @@ export OPD_TOKENIZER_DEBUG=${OPD_TOKENIZER_DEBUG:-"1"}
 export OPD_PROMPT_BRIDGE_MODE=${OPD_PROMPT_BRIDGE_MODE:-""}
 export OPD_TEACHER_SYSTEM_PROMPT_PATH=${OPD_TEACHER_SYSTEM_PROMPT_PATH:-""}
 export OPD_TEACHER_PROMPT_PATH=${OPD_TEACHER_PROMPT_PATH:-""}
+export OPD_SUPERVISE_EOS=${OPD_SUPERVISE_EOS:-"1"}
 
 # Keep the terminal useful during debugging: show one student rollout and only
 # the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.

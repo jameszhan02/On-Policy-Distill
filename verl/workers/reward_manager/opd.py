@@ -78,6 +78,9 @@ DEBUG = False
 # separate, simpler path gated on this flag instead.
 R1_ZERO_MODE = os.environ.get("R1_ZERO_MODE", "0").strip() == "1"
 OPD_PROMPT_BRIDGE_MODE = os.environ.get("OPD_PROMPT_BRIDGE_MODE", "").strip().lower()
+OPD_SUPERVISE_EOS = os.environ.get("OPD_SUPERVISE_EOS", "1").strip().lower() not in {
+    "0", "false", "no", "off"
+}
 
 _DEFAULT_ALPACA_SYSTEM_PROMPT = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
 
@@ -402,6 +405,7 @@ class TeacherClient:
         print("\n=== OPD tokenizer / mapping detection ===", flush=True)
         print(f"[mode] R1_ZERO_MODE={R1_ZERO_MODE}", flush=True)
         print(f"[mode] OPD_PROMPT_BRIDGE_MODE={self.prompt_bridge_mode or '<off>'}", flush=True)
+        print(f"[mode] OPD_SUPERVISE_EOS={OPD_SUPERVISE_EOS}", flush=True)
         for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
             print(f"[{label}] name_or_path={tokenizer.name_or_path}", flush=True)
             print(f"[{label}] class={tokenizer.__class__.__name__}", flush=True)
@@ -1881,7 +1885,7 @@ class TeacherClient:
                 sentinel_end = len(student_ids)
                 n_special = sentinel_end - sentinel_start
 
-                if n_special > 0:
+                if n_special > 0 and OPD_SUPERVISE_EOS:
                     # Teacher's eos logprob: predicts eos at position teacher_resp_end_tok,
                     # so its logprob is at teacher_logps[teacher_resp_end_tok - 1]
                     teacher_eos_logp_idx = teacher_resp_end_tok - 1
@@ -1902,6 +1906,15 @@ class TeacherClient:
                         remaining_positions = valid_positions[sentinel_start + 1:sentinel_end]
                         teacher_topk_logps_padded[i, remaining_positions] = float('inf')
                         teacher_chunk_ids_padded[i, remaining_positions] = -1.0
+                elif n_special > 0:
+                    # Optional stability valve: do not let teacher EOS
+                    # preferences push the student toward too-early or
+                    # too-late stopping.  Mark all student terminal/special
+                    # positions as OPD-skipped while keeping content-token
+                    # supervision unchanged.
+                    special_positions = valid_positions[sentinel_start:sentinel_end]
+                    teacher_topk_logps_padded[i, special_positions] = float('inf')
+                    teacher_chunk_ids_padded[i, special_positions] = -1.0
 
             self.last_alignment_stats = alignment_stats
             return torch.cat(

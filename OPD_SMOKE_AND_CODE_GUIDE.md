@@ -169,6 +169,13 @@ OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
 OPD_TOKENIZER_DEBUG=1 \
 ray start --head --num-gpus=1 --include-dashboard=false
 
+R1_ZERO_MODE=0 \
+OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
+OPD_TEACHER_PROMPT='{question}' \
+VERL_GSM8K_EVAL_PROMPT_TYPE=instruct \
+OPD_TOKENIZER_DEBUG=1 \
+ray start --head --num-gpus=1 --include-dashboard=false
+
 
 ray status   # confirm it now shows a live, local cluster
 ```
@@ -186,11 +193,28 @@ r1_zero
 ```bash
 R1_ZERO_MODE=0 \
 ENABLE_ACTIVATION_OFFLOAD=True \
-TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
-TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small.parquet \
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train_clean_question.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small_clean_question.parquet \
 MODEL_PATH=/data/shared_ckpt/llama32-1b-loosepacked_4ep_20260807_233449/hf_ckpts/step_0002400 \
 TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
+bash cross_distill_smoke_1gpu.sh
+```
+
+```bash
+R1_ZERO_MODE=0 \
+ENABLE_ACTIVATION_OFFLOAD=True \
+TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train_clean_question.parquet \
+TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small_clean_question.parquet \
+MODEL_PATH=/data/shared_ckpt/llama32-1b-loosepacked_4ep_20260807_233449/hf_ckpts/step_0002400 \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
+OPD_TEACHER_PROMPT='{question}' \
+VERL_GSM8K_EVAL_PROMPT_TYPE=instruct \
+MAX_RESPONSE_LENGTH=256 \
+TEMPERATURE=0.7 \
+TOP_P=0.9 \
+EXP_NAME=bridge-alpaca-teacher-no-r1-001 \
 bash cross_distill_smoke_1gpu.sh
 ```
 
