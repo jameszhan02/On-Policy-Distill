@@ -679,7 +679,7 @@ model merger:
 cd /data/shengzhan/On-Policy-Distill
 source .venv/bin/activate
 
-RUN_DIR=data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU_Llama-3.2-1B-Instruct_to_opd_teacher
+RUN_DIR=data/smoke_ckpts/ON_POLICY_DISTILL/bridge-alpaca-teacher-no-r1-001
 export STEP=5000
 
 # data/shengzhan/On-Policy-Distill/data/smoke_ckpts/ON_POLICY_DISTILL/OPD_SMOKE_1GPU_Llama-3.2-1B-Instruct_to_opd_teacher/global_step_3000/actor_hf_merged
@@ -689,6 +689,8 @@ python3 -m verl.model_merger merge \
   --local_dir "${RUN_DIR}/global_step_${STEP}/actor" \
   --target_dir "${RUN_DIR}/global_step_${STEP}/actor_hf_merged"
 ```
+
+/data/shengzhan/On-Policy-Distill/data/smoke_ckpts/ON_POLICY_DISTILL/bridge-alpaca-teacher-no-r1-001/global_step_500/actor_hf_merged
 
 Set `STEP` to the checkpoint to convert. For example, to convert step 2000:
 
