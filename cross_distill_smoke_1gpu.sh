@@ -148,10 +148,12 @@ export TEACHER_CKPT_PATH
 export TEACHER_MAX_SEQ_LEN=${TEACHER_MAX_SEQ_LEN:-"1280"}
 export HYDRA_FULL_ERROR=1
 
-# Reduce CUDA allocator fragmentation when the teacher (a separate process,
-# often already resident on the same GPU) and this training process each run
-# their own PyTorch/vLLM allocator.
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-"expandable_segments:True"}
+# vLLM's CuMemAllocator is not compatible with
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True.  Leave this unset by
+# default; callers may still opt into a CUDA allocator setting explicitly.
+if [[ -n "${PYTORCH_CUDA_ALLOC_CONF:-}" ]]; then
+    export PYTORCH_CUDA_ALLOC_CONF
+fi
 
 export OPD_DUMP_DIR=${OPD_DUMP_DIR:-"/tmp/opd_dumps"}
 export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
@@ -243,10 +245,14 @@ fi
 
 if [[ "${RESTART_RAY:-0}" == "1" ]]; then
     "${RAY_BIN}" stop -f || true
-    "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+    if [[ "${RAY_CLEAR_CUDA_ALLOC_CONF:-1}" == "1" ]]; then
+        env -u PYTORCH_CUDA_ALLOC_CONF "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+    else
+        "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+    fi
 elif [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
     "${RAY_BIN}" status >/dev/null 2>&1 || \
-        "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+        env -u PYTORCH_CUDA_ALLOC_CONF "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
 fi
 
 "${PYTHON_BIN}" -m verl.trainer.main_ppo \
