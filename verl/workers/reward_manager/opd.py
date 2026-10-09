@@ -81,6 +81,14 @@ OPD_PROMPT_BRIDGE_MODE = os.environ.get("OPD_PROMPT_BRIDGE_MODE", "").strip().lo
 OPD_SUPERVISE_EOS = os.environ.get("OPD_SUPERVISE_EOS", "1").strip().lower() not in {
     "0", "false", "no", "off"
 }
+_OPD_EOS_LOGP_FLOOR_RAW = os.environ.get("OPD_EOS_LOGP_FLOOR", "").strip()
+OPD_EOS_LOGP_FLOOR = float(_OPD_EOS_LOGP_FLOOR_RAW) if _OPD_EOS_LOGP_FLOOR_RAW else None
+OPD_EOS_IGNORE_NEG_AFTER_TOKENS = int(os.environ.get("OPD_EOS_IGNORE_NEG_AFTER_TOKENS", "0"))
+_OPD_EOS_IGNORE_NEG_AFTER_RATIO_RAW = os.environ.get("OPD_EOS_IGNORE_NEG_AFTER_RATIO", "").strip()
+OPD_EOS_IGNORE_NEG_AFTER_RATIO = (
+    float(_OPD_EOS_IGNORE_NEG_AFTER_RATIO_RAW) if _OPD_EOS_IGNORE_NEG_AFTER_RATIO_RAW else None
+)
+OPD_EOS_NEG_SKIP_THRESHOLD = float(os.environ.get("OPD_EOS_NEG_SKIP_THRESHOLD", "-2.0"))
 
 _DEFAULT_ALPACA_SYSTEM_PROMPT = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
 
@@ -406,6 +414,13 @@ class TeacherClient:
         print(f"[mode] R1_ZERO_MODE={R1_ZERO_MODE}", flush=True)
         print(f"[mode] OPD_PROMPT_BRIDGE_MODE={self.prompt_bridge_mode or '<off>'}", flush=True)
         print(f"[mode] OPD_SUPERVISE_EOS={OPD_SUPERVISE_EOS}", flush=True)
+        print(
+            f"[mode] OPD_EOS_LOGP_FLOOR={OPD_EOS_LOGP_FLOOR} "
+            f"OPD_EOS_IGNORE_NEG_AFTER_TOKENS={OPD_EOS_IGNORE_NEG_AFTER_TOKENS} "
+            f"OPD_EOS_IGNORE_NEG_AFTER_RATIO={OPD_EOS_IGNORE_NEG_AFTER_RATIO} "
+            f"OPD_EOS_NEG_SKIP_THRESHOLD={OPD_EOS_NEG_SKIP_THRESHOLD}",
+            flush=True,
+        )
         for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
             print(f"[{label}] name_or_path={tokenizer.name_or_path}", flush=True)
             print(f"[{label}] class={tokenizer.__class__.__name__}", flush=True)
@@ -1893,6 +1908,31 @@ class TeacherClient:
                         teacher_eos_logp = teacher_logps[teacher_eos_logp_idx]
                     else:
                         teacher_eos_logp = float('inf')
+
+                    supervise_eos_this_token = True
+                    if torch.isfinite(torch.as_tensor(teacher_eos_logp)):
+                        eos_ignore_after_tokens = OPD_EOS_IGNORE_NEG_AFTER_TOKENS
+                        if OPD_EOS_IGNORE_NEG_AFTER_RATIO is not None:
+                            response_budget = int(batch.batch["responses"].shape[-1])
+                            ratio_threshold = int(response_budget * OPD_EOS_IGNORE_NEG_AFTER_RATIO + 0.999999)
+                            eos_ignore_after_tokens = max(eos_ignore_after_tokens, ratio_threshold)
+                        if (
+                            eos_ignore_after_tokens > 0
+                            and len(student_resp_ids) >= eos_ignore_after_tokens
+                            and float(teacher_eos_logp) < OPD_EOS_NEG_SKIP_THRESHOLD
+                        ):
+                            supervise_eos_this_token = False
+                        elif OPD_EOS_LOGP_FLOOR is not None:
+                            teacher_eos_logp = torch.clamp(
+                                torch.as_tensor(teacher_eos_logp),
+                                min=OPD_EOS_LOGP_FLOOR,
+                            ).to(teacher_logps.device, dtype=teacher_logps.dtype)
+
+                    if not supervise_eos_this_token:
+                        special_positions = valid_positions[sentinel_start:sentinel_end]
+                        teacher_topk_logps_padded[i, special_positions] = float('inf')
+                        teacher_chunk_ids_padded[i, special_positions] = -1.0
+                        continue
 
                     # First special token gets teacher's eos logprob
                     first_special_pos = valid_positions[sentinel_start]

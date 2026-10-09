@@ -163,6 +163,10 @@ export OPD_PROMPT_BRIDGE_MODE=${OPD_PROMPT_BRIDGE_MODE:-""}
 export OPD_TEACHER_SYSTEM_PROMPT_PATH=${OPD_TEACHER_SYSTEM_PROMPT_PATH:-""}
 export OPD_TEACHER_PROMPT_PATH=${OPD_TEACHER_PROMPT_PATH:-""}
 export OPD_SUPERVISE_EOS=${OPD_SUPERVISE_EOS:-"1"}
+export OPD_EOS_LOGP_FLOOR=${OPD_EOS_LOGP_FLOOR:-""}
+export OPD_EOS_IGNORE_NEG_AFTER_TOKENS=${OPD_EOS_IGNORE_NEG_AFTER_TOKENS:-"0"}
+export OPD_EOS_IGNORE_NEG_AFTER_RATIO=${OPD_EOS_IGNORE_NEG_AFTER_RATIO:-""}
+export OPD_EOS_NEG_SKIP_THRESHOLD=${OPD_EOS_NEG_SKIP_THRESHOLD:-"-2.0"}
 
 # Keep the terminal useful during debugging: show one student rollout and only
 # the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.
@@ -237,7 +241,10 @@ if [[ "${R1_ZERO_MODE}" == "1" ]]; then
     EXTRA_HYDRA_ARGS+=("+data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")
 fi
 
-if [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
+if [[ "${RESTART_RAY:-0}" == "1" ]]; then
+    "${RAY_BIN}" stop -f || true
+    "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
+elif [[ "${AUTO_START_RAY:-1}" == "1" ]]; then
     "${RAY_BIN}" status >/dev/null 2>&1 || \
         "${RAY_BIN}" start --head --num-gpus="${NGPUS_PER_NODE}" --include-dashboard=false
 fi

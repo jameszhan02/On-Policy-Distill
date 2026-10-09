@@ -166,6 +166,9 @@ ray stop
 
 R1_ZERO_MODE=0 \
 OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
+OPD_TEACHER_PROMPT='{question}' \
+VERL_GSM8K_EVAL_PROMPT_TYPE=instruct \
+OPD_SUPERVISE_EOS=0 \
 OPD_TOKENIZER_DEBUG=1 \
 ray start --head --num-gpus=1 --include-dashboard=false
 
@@ -211,9 +214,15 @@ TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
 OPD_TEACHER_PROMPT='{question}' \
 VERL_GSM8K_EVAL_PROMPT_TYPE=instruct \
-MAX_RESPONSE_LENGTH=256 \
-TEMPERATURE=0.7 \
+TEMPERATURE=0.6 \
 TOP_P=0.9 \
+OPD_SUPERVISE_EOS=1 \
+OPD_EOS_LOGP_FLOOR=-2 \
+OPD_EOS_IGNORE_NEG_AFTER_RATIO=0.33 \
+OPD_EOS_NEG_SKIP_THRESHOLD=-2 \
+TEMPERATURE=0.6 \
+TOP_P=0.9 \
+RESTART_RAY=1 \
 EXP_NAME=bridge-alpaca-teacher-no-r1-001 \
 bash cross_distill_smoke_1gpu.sh
 ```
