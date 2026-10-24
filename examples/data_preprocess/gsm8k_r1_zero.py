@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preprocess GSM8K into the r1_zero few-shot prompt/answer protocol.
+"""Preprocess GSM8K into an lllm r1_zero prompt/answer protocol.
 
 This mirrors examples/data_preprocess/gsm8k.py's extraction logic exactly
 (ground_truth via the "#### number" regex on the *source* answer, which GSM8K
@@ -50,6 +50,18 @@ R1_ZERO_ONE_SHOT_TEMPLATE = (
     "Assistant: <think>"
 )
 
+# Verbatim lllm/alignment/prompts/r1_zero_llama.prompt. Unlike the original
+# r1_zero prompt, this variant does not prefill <think>; the student must emit
+# the complete <think>...</think> <answer>...</answer> response itself.
+R1_ZERO_LLAMA_TEMPLATE = (
+    "A conversation between User and Assistant. The User asks a math question, and the Assistant solves it. "
+    "The Assistant must write its reasoning between <think> and </think>, then write only the final answer "
+    "between <answer> and </answer>. The complete response must use this form: "
+    "<think> reasoning process here </think> <answer> final answer here </answer>.\n"
+    "User: {question}\n"
+    "Assistant:\n"
+)
+
 
 def extract_solution(solution_str: str) -> str:
     """Identical to gsm8k.py's extraction: GSM8K's own source answers always
@@ -60,12 +72,16 @@ def extract_solution(solution_str: str) -> str:
     return solution.group(0).split("#### ")[1].replace(",", "")
 
 
-def build_prompt(question: str) -> list[dict]:
-    r1_zero_text = R1_ZERO_ONE_SHOT_TEMPLATE.format(question=question)
+def build_prompt(question: str, prompt_variant: str = "r1_zero") -> list[dict]:
+    if prompt_variant == "r1_zero_llama":
+        template = R1_ZERO_LLAMA_TEMPLATE
+    else:
+        template = R1_ZERO_ONE_SHOT_TEMPLATE
+    r1_zero_text = template.format(question=question)
     return [{"role": "user", "content": r1_zero_text}]
 
 
-def convert(dataset, split: str) -> pd.DataFrame:
+def convert(dataset, split: str, prompt_variant: str = "r1_zero") -> pd.DataFrame:
     rows = []
     for idx, ex in enumerate(dataset):
         question_raw = ex["question"]
@@ -73,7 +89,7 @@ def convert(dataset, split: str) -> pd.DataFrame:
         rows.append(
             {
                 "data_source": "openai/gsm8k",
-                "prompt": build_prompt(question_raw),
+                "prompt": build_prompt(question_raw, prompt_variant),
                 "ability": "math",
                 "reward_model": {"style": "rule", "ground_truth": extract_solution(answer_raw)},
                 "extra_info": {
@@ -81,7 +97,7 @@ def convert(dataset, split: str) -> pd.DataFrame:
                     "index": idx,
                     "answer": answer_raw,
                     "question": question_raw,
-                    "prompt_variant": "r1_zero_three_shot",
+                    "prompt_variant": prompt_variant,
                 },
             }
         )
@@ -93,13 +109,19 @@ def main() -> None:
     parser.add_argument(
         "--local_save_dir", default="data/gsm8k_r1zero", help="Output directory for train.parquet/test.parquet."
     )
+    parser.add_argument(
+        "--prompt-variant",
+        choices=("r1_zero", "r1_zero_llama"),
+        default="r1_zero",
+        help="Raw lllm prompt format to store in the parquet prompt column.",
+    )
     args = parser.parse_args()
 
     import datasets
 
     dataset = datasets.load_dataset("openai/gsm8k", "main")
-    train_df = convert(dataset["train"], "train")
-    test_df = convert(dataset["test"], "test")
+    train_df = convert(dataset["train"], "train", args.prompt_variant)
+    test_df = convert(dataset["test"], "test", args.prompt_variant)
 
     os.makedirs(args.local_save_dir, exist_ok=True)
     train_path = os.path.join(args.local_save_dir, "train.parquet")

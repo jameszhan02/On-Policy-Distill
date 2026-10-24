@@ -151,6 +151,13 @@ TEACHER_ENFORCE_EAGER=1 \
 bash start_server_smoke_1gpu.sh
 ```
 
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+TEACHER_GPU_MEMORY_UTILIZATION=0.17 \
+TEACHER_MAX_MODEL_LEN=1280 \
+TEACHER_MAX_NUM_BATCHED_TOKENS=1280 \
+TEACHER_ENFORCE_EAGER=1 \
+bash start_server_smoke_1gpu.sh
+
 ```bash
 tail -f worker.log
 ```
@@ -183,6 +190,32 @@ ray start --head --num-gpus=1 --include-dashboard=false
 ray status   # confirm it now shows a live, local cluster
 ```
 
+### Raw `r1_zero_llama` student to raw `r1_zero` teacher
+
+This pairing uses two different lllm prompt files. The student prompt ends in
+`Assistant:` and requires the student to generate `<think>`. The teacher prompt
+ends in `Assistant: <think>`. Use the dedicated bridge so that the teacher's
+prefilled token is present exactly once and is still included in response-token
+alignment:
+
+```bash
+ray stop
+
+R1_ZERO_MODE=0 \
+OPD_PROMPT_BRIDGE_MODE=r1_zero_llama_to_r1_zero \
+VERL_GSM8K_EVAL_PROMPT_TYPE=r1_zero_llama \
+OPD_SUPERVISE_EOS=0 \
+OPD_TOKENIZER_DEBUG=1 \
+ray start --head --num-gpus=1 --include-dashboard=false
+```
+
+Do not set the old `OPD_TEACHER_PROMPT='{question}'` override for this route.
+The bridge has the exact lllm `r1_zero.prompt` text built in. Alternatively,
+set `OPD_TEACHER_PROMPT_PATH` to that prompt file. The smoke script generates
+`gsm8k_r1zero_llama/{train,test}.parquet` automatically and applies a raw
+passthrough tokenizer chat template; a custom `TRAIN_FILE`/`TEST_FILE` must
+already contain the full `r1_zero_llama` prompt in each row's `prompt` content.
+
 ```bash
 TRAIN_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/train.parquet \
 TEST_FILE=/data/shengzhan/On-Policy-Distill/data/gsm8k/val_small.parquet \
@@ -203,6 +236,24 @@ TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
 OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1 \
 bash cross_distill_smoke_1gpu.sh
 ```
+
+env -u OPD_TEACHER_PROMPT \
+ -u OPD_TEACHER_SYSTEM_PROMPT \
+ -u OPD_TEACHER_PROMPT_PATH \
+ -u OPD_TEACHER_SYSTEM_PROMPT_PATH \
+R1_ZERO_MODE=0 \
+OPD_PROMPT_BRIDGE_MODE=r1_zero_llama_to_r1_zero \
+VERL_GSM8K_EVAL_PROMPT_TYPE=r1_zero_llama \
+OPD_SUPERVISE_EOS=0 \
+OPD_TOKENIZER_DEBUG=1 \
+RESTART_RAY=1 \
+ENABLE_ACTIVATION_OFFLOAD=True \
+MODEL_PATH=/data/shengzhan/lllm/models/rl/llama32_1b_gsm8k/cot_sft_grpo_200step_20261022_134438/hf_ckpts/step_0000199 \
+TEACHER_CKPT_PATH=/data/shared_ckpt/opd_teacher \
+TEMPERATURE=1.0 \
+TOP_P=1.0 \
+EXP_NAME=r1zero-llama-student-to-r1zero-teacher-001 \
+bash cross_distill_smoke_1gpu.sh
 
 ```bash
 R1_ZERO_MODE=0 \

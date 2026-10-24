@@ -480,6 +480,14 @@ if __name__ == "__main__":
         # manager, which runs in a separate Ray worker process and otherwise
         # never sees the driver shell's `export R1_ZERO_MODE=1`).
         "R1_ZERO_MODE",
+        "OPD_PROMPT_BRIDGE_MODE",
+        "OPD_TEACHER_SYSTEM_PROMPT_PATH",
+        "OPD_TEACHER_SYSTEM_PROMPT",
+        "OPD_TEACHER_PROMPT_PATH",
+        "OPD_TEACHER_PROMPT",
+        "OPD_SUPERVISE_EOS",
+        "OPD_TOKENIZER_DEBUG",
+        "VERL_GSM8K_EVAL_PROMPT_TYPE",
         # OPD: alignment dump configuration
         "OPD_DUMP_DIR",
         "OPD_DUMP_NUM_SEQS",

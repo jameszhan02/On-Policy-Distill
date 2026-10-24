@@ -57,7 +57,7 @@ def get_ppo_ray_runtime_env():
     # shell's environment. Variables matching these prefixes are forwarded
     # automatically so that reward managers (e.g., OPD TeacherClient) can
     # access them via os.environ on the worker side.
-    _PROPAGATE_PREFIXES = ("TEACHER_", "OPD_", "HYDRA_", "VAL_")
+    _PROPAGATE_PREFIXES = ("TEACHER_", "OPD_", "HYDRA_", "VAL_", "VERL_")
     for key, value in os.environ.items():
         if any(key.startswith(prefix) for prefix in _PROPAGATE_PREFIXES):
             runtime_env["env_vars"][key] = value

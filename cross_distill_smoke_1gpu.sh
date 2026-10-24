@@ -131,7 +131,17 @@ CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/smoke_ckpts/${project_name}/${exp_name}
 # instead of wrapping it inside this tokenizer's own native chat template.
 R1_ZERO_MODE=${R1_ZERO_MODE:-0}
 export R1_ZERO_MODE
-if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+OPD_PROMPT_BRIDGE_MODE=${OPD_PROMPT_BRIDGE_MODE:-""}
+export OPD_PROMPT_BRIDGE_MODE
+r1_zero_llama_bridge=0
+if [[ "${OPD_PROMPT_BRIDGE_MODE}" == "r1_zero_llama_to_r1_zero" || \
+      "${OPD_PROMPT_BRIDGE_MODE}" == "r1zero_llama_to_r1zero" ]]; then
+    r1_zero_llama_bridge=1
+fi
+if (( r1_zero_llama_bridge )); then
+    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_llama/train.parquet"}
+    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_llama/test.parquet"}
+elif [[ "${R1_ZERO_MODE}" == "1" ]]; then
     TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/train.parquet"}
     TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/test.parquet"}
 else
@@ -160,8 +170,8 @@ export OPD_DUMP_NUM_SEQS=${OPD_DUMP_NUM_SEQS:-"1"}
 export OPD_DUMP_MAX_STEPS=${OPD_DUMP_MAX_STEPS:-"3"}
 export OPD_TOKENIZER_DEBUG=${OPD_TOKENIZER_DEBUG:-"1"}
 # Optional prompt bridge for teachers evaluated with lllm's Alpaca+r1_zero
-# prompt, e.g. OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1.
-export OPD_PROMPT_BRIDGE_MODE=${OPD_PROMPT_BRIDGE_MODE:-""}
+# prompt, e.g. OPD_PROMPT_BRIDGE_MODE=alpaca_to_alpaca_r1, or raw lllm
+# r1_zero_llama student -> r1_zero teacher prompts.
 export OPD_TEACHER_SYSTEM_PROMPT_PATH=${OPD_TEACHER_SYSTEM_PROMPT_PATH:-""}
 export OPD_TEACHER_PROMPT_PATH=${OPD_TEACHER_PROMPT_PATH:-""}
 export OPD_SUPERVISE_EOS=${OPD_SUPERVISE_EOS:-"1"}
@@ -169,6 +179,9 @@ export OPD_EOS_LOGP_FLOOR=${OPD_EOS_LOGP_FLOOR:-""}
 export OPD_EOS_IGNORE_NEG_AFTER_TOKENS=${OPD_EOS_IGNORE_NEG_AFTER_TOKENS:-"0"}
 export OPD_EOS_IGNORE_NEG_AFTER_RATIO=${OPD_EOS_IGNORE_NEG_AFTER_RATIO:-""}
 export OPD_EOS_NEG_SKIP_THRESHOLD=${OPD_EOS_NEG_SKIP_THRESHOLD:-"-2.0"}
+if (( r1_zero_llama_bridge )); then
+    export VERL_GSM8K_EVAL_PROMPT_TYPE=${VERL_GSM8K_EVAL_PROMPT_TYPE:-"r1_zero_llama"}
+fi
 
 # Keep the terminal useful during debugging: show one student rollout and only
 # the high-signal metrics each step. Full rollouts remain in ROLLOUT_DATA_DIR.
@@ -214,7 +227,11 @@ rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
 max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS:-$((max_num_seqs * student_max_seq_len))}
 
 if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
-    if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+    if (( r1_zero_llama_bridge )); then
+        "${PYTHON_BIN}" examples/data_preprocess/gsm8k_r1_zero.py \
+            --prompt-variant r1_zero_llama \
+            --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero_llama"
+    elif [[ "${R1_ZERO_MODE}" == "1" ]]; then
         "${PYTHON_BIN}" examples/data_preprocess/gsm8k_r1_zero.py --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero"
     else
         "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
@@ -235,7 +252,7 @@ fi
 # character.
 r1_zero_chat_template="\"{{ bos_token }}{{ messages[0]['content'] }}\""
 EXTRA_HYDRA_ARGS=()
-if [[ "${R1_ZERO_MODE}" == "1" ]]; then
+if [[ "${R1_ZERO_MODE}" == "1" ]] || (( r1_zero_llama_bridge )); then
     # "+" (not plain "=") is required: apply_chat_template_kwargs starts as an
     # empty dict in the base config (struct mode), so this is adding a new key,
     # not overriding an existing one -- Hydra's own error message for the

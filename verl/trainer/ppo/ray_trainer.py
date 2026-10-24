@@ -222,6 +222,56 @@ def _lllm_r1_zero_grade(response: str, ground_truth) -> dict:
     }
 
 
+def _lllm_r1_zero_llama_grade(response: str, ground_truth) -> dict:
+    """Mirror lllm's EOS-agnostic r1_zero_llama reward for diagnostics."""
+    tags = ("<think>", "</think>", "<answer>", "</answer>")
+    positions = [response.find(tag) for tag in tags]
+    has_single_ordered_tags = (
+        all(response.count(tag) == 1 for tag in tags)
+        and all(position >= 0 for position in positions)
+        and positions == sorted(positions)
+    )
+
+    prediction = None
+    format_valid = False
+    if has_single_ordered_tags:
+        think_text = response[positions[0] + len(tags[0]) : positions[1]].strip()
+        answer_text = response[positions[2] + len(tags[2]) : positions[3]].strip()
+        format_valid = bool(think_text and answer_text)
+        prediction = _extract_boxed_answer(answer_text) if "\\boxed" in answer_text else None
+        if prediction is None:
+            prediction = _extract_last_number(answer_text)
+
+    # Match lllm's cold-start behavior: a correct unformatted answer gets
+    # partial reward even before the model learns the complete tag protocol.
+    if prediction is None:
+        prediction = _extract_last_number(response)
+    answer_correct = _gsm8k_answer_equal(prediction, ground_truth)
+    reward = 1.0 if answer_correct and format_valid else (0.5 if answer_correct else 0.0)
+
+    if format_valid:
+        failure = None
+    elif any(response.count(tag) > 1 for tag in tags):
+        failure = "multiple_markers"
+    elif not has_single_ordered_tags:
+        failure = "missing_or_unordered_tags"
+    else:
+        failure = "empty_reasoning_or_answer"
+
+    return {
+        "eval_prompt_type": "r1_zero_llama",
+        "format_reward": 1.0 if format_valid else 0.0,
+        "answer_reward": 1.0 if answer_correct else 0.0,
+        "reward": reward,
+        "format_valid": format_valid,
+        "marker_count": response.count("<answer>"),
+        "extracted_answer": prediction,
+        "answer_correct": answer_correct,
+        "strict_correct": answer_correct and format_valid,
+        "format_failure": failure,
+    }
+
+
 def _lllm_instruct_grade(response: str, ground_truth) -> dict:
     """Mirror lllm's _instruct_reward_fn answer extraction."""
     prediction = _extract_instruct_answer(response)
@@ -321,6 +371,8 @@ def _classify_gsm8k_response(response: str, ground_truth) -> dict:
     """Diagnose rollout answers using the same prompt-type convention as lllm eval."""
     if _GSM8K_EVAL_PROMPT_TYPE in {"r1_zero", "r1_zero_three_shot_gsm8k"}:
         return _lllm_r1_zero_grade(response, ground_truth)
+    if _GSM8K_EVAL_PROMPT_TYPE == "r1_zero_llama":
+        return _lllm_r1_zero_llama_grade(response, ground_truth)
     if _GSM8K_EVAL_PROMPT_TYPE in {"instruct", "plain_question_only", "question_only"}:
         return _lllm_instruct_grade(response, ground_truth)
     if _GSM8K_EVAL_PROMPT_TYPE == "legacy":

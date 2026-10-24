@@ -102,6 +102,10 @@ _DEFAULT_R1_FOR_ALPACA_PROMPT = """A conversation between User and Assistant. Th
 
 {question}"""
 
+_DEFAULT_R1_ZERO_TEACHER_PROMPT = """A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
+User: {question}
+Assistant: <think>"""
+
 # ---- Alignment dump configuration (controlled by environment variables) ----
 # OPD_DUMP_DIR: directory to write alignment debug dumps (disabled if unset/empty)
 # OPD_DUMP_NUM_SEQS: number of sequences to dump per step (default: 2)
@@ -208,16 +212,30 @@ class TeacherClient:
         self._tokenizer_debug_printed = False
         self.last_alignment_stats = []
         self.prompt_bridge_mode = OPD_PROMPT_BRIDGE_MODE
+        raw_llama_bridge = self._uses_r1_zero_llama_bridge()
         self._bridge_teacher_system_prompt = self._load_prompt_template_from_env(
             "OPD_TEACHER_SYSTEM_PROMPT_PATH",
             "OPD_TEACHER_SYSTEM_PROMPT",
-            _DEFAULT_ALPACA_SYSTEM_PROMPT,
+            "{instruction}" if raw_llama_bridge else _DEFAULT_ALPACA_SYSTEM_PROMPT,
         )
         self._bridge_teacher_prompt = self._load_prompt_template_from_env(
             "OPD_TEACHER_PROMPT_PATH",
             "OPD_TEACHER_PROMPT",
-            _DEFAULT_R1_FOR_ALPACA_PROMPT,
+            _DEFAULT_R1_ZERO_TEACHER_PROMPT if raw_llama_bridge else _DEFAULT_R1_FOR_ALPACA_PROMPT,
         )
+        if raw_llama_bridge:
+            probe_instruction = self._bridge_teacher_prompt.format(
+                question="__QUESTION__", instruction="__QUESTION__"
+            )
+            probe_prompt = self._bridge_teacher_system_prompt.format(
+                instruction=probe_instruction, question="__QUESTION__"
+            )
+            if not probe_prompt.endswith("<think>"):
+                raise ValueError(
+                    "r1_zero_llama_to_r1_zero requires the rendered teacher prompt to end "
+                    "with '<think>'. Unset the old OPD_TEACHER_PROMPT='{question}' override, "
+                    "or point OPD_TEACHER_PROMPT_PATH at lllm/alignment/prompts/r1_zero.prompt."
+                )
         self._run()
 
     @staticmethod
@@ -251,10 +269,19 @@ class TeacherClient:
         return default
 
     def _uses_prompt_bridge(self) -> bool:
+        return self._uses_alpaca_prompt_bridge() or self._uses_r1_zero_llama_bridge()
+
+    def _uses_alpaca_prompt_bridge(self) -> bool:
         return self.prompt_bridge_mode in {
             "alpaca_to_alpaca_r1",
             "alpaca_to_r1_alpaca",
             "lllm_alpaca_r1",
+        }
+
+    def _uses_r1_zero_llama_bridge(self) -> bool:
+        return self.prompt_bridge_mode in {
+            "r1_zero_llama_to_r1_zero",
+            "r1zero_llama_to_r1zero",
         }
 
     def _is_same_tokenizer(self):
@@ -463,7 +490,7 @@ class TeacherClient:
 
         print(f"[mapping] vocabularies_identical={same_tokenizer}", flush=True)
         if self._uses_prompt_bridge():
-            print("[mapping] selected_route=prompt_bridge_alpaca_to_alpaca_r1", flush=True)
+            print(f"[mapping] selected_route=prompt_bridge_{self.prompt_bridge_mode}", flush=True)
             print(
                 f"[mapping] teacher_system_prompt={self._compact_template(self._bridge_teacher_system_prompt)}",
                 flush=True,
@@ -718,9 +745,32 @@ class TeacherClient:
         instruction = prompt_part[instruction_start + len(instruction_marker):].strip()
         return instruction, response_text
 
+    def _split_r1_zero_llama_prompt(self, student_text: str):
+        """Split lllm's raw r1_zero_llama prompt into question and response."""
+        text = self._strip_student_bos(student_text)
+        response_marker = "\nAssistant:\n"
+        response_start = text.rfind(response_marker)
+        if response_start == -1:
+            response_marker = "\nAssistant:"
+            response_start = text.rfind(response_marker)
+        if response_start == -1:
+            raise ValueError("Cannot find r1_zero_llama response marker 'Assistant:'")
+
+        prompt_part = text[:response_start]
+        response_text = text[response_start + len(response_marker):]
+        question_marker = "\nUser: "
+        question_start = prompt_part.rfind(question_marker)
+        if question_start == -1:
+            raise ValueError("Cannot find r1_zero_llama question marker 'User: '")
+        question = prompt_part[question_start + len(question_marker):].strip()
+        return question, response_text
+
     def _build_bridge_teacher_prompt(self, student_prompt_text: str) -> str:
-        instruction, _ = self._split_alpaca_prompt(student_prompt_text)
-        question = self._normalize_bridge_question(instruction)
+        if self._uses_r1_zero_llama_bridge():
+            question, _ = self._split_r1_zero_llama_prompt(student_prompt_text)
+        else:
+            instruction, _ = self._split_alpaca_prompt(student_prompt_text)
+            question = self._normalize_bridge_question(instruction)
         teacher_instruction = self._bridge_teacher_prompt.format(
             question=question,
             instruction=question,
@@ -735,14 +785,34 @@ class TeacherClient:
         return teacher_prompt
 
     def _bridge_student_text_to_teacher(self, student_text: str) -> str:
-        """Convert Alpaca student text to the lllm Alpaca+r1_zero teacher prompt."""
-        _, response_text = self._split_alpaca_prompt(student_text)
+        """Convert a supported student prompt and response to the teacher format."""
+        if self._uses_r1_zero_llama_bridge():
+            _, response_text = self._split_r1_zero_llama_prompt(student_text)
+            # The teacher prompt already owns this token. Keep exactly one copy
+            # in the teacher sequence; alignment starts before the prefilled
+            # token so the student's generated <think> remains supervised.
+            if response_text.startswith("<think>"):
+                response_text = response_text[len("<think>"):]
+        else:
+            _, response_text = self._split_alpaca_prompt(student_text)
         teacher_prompt = self._build_bridge_teacher_prompt(student_text)
         response_text, had_terminal = self._strip_student_terminal(response_text)
         teacher_eos = self.tokenizer.eos_token or ""
         if had_terminal and teacher_eos:
             response_text = response_text + teacher_eos
         return teacher_prompt + response_text
+
+    def _bridge_teacher_response_start_text(
+        self, teacher_prompt_text: str, student_response_text: str | None = None
+    ) -> str:
+        """Return the teacher text strictly before the aligned response."""
+        if (
+            self._uses_r1_zero_llama_bridge()
+            and teacher_prompt_text.endswith("<think>")
+            and (student_response_text is None or student_response_text.startswith("<think>"))
+        ):
+            return teacher_prompt_text[:-len("<think>")]
+        return teacher_prompt_text
 
     def retokenize_batch(self, batch):
         """Convert a batch of student token ID sequences to teacher token ID sequences.
@@ -1604,8 +1674,8 @@ class TeacherClient:
                         )
                         continue
                 elif prompt_bridge_mode:
-                    # Re-render the student's Alpaca prompt into the exact
-                    # teacher prompt shape used by lllm's Alpaca+r1_zero eval.
+                    # Re-render the student prompt into the exact teacher
+                    # prompt shape selected by OPD_PROMPT_BRIDGE_MODE.
                     student_prompt_text = student_tokenizer.decode(
                         student_ids[:student_resp_start_tok], skip_special_tokens=False
                     )
@@ -1614,8 +1684,12 @@ class TeacherClient:
                     except ValueError as exc:
                         warnings.warn(f"[align seq {i}] prompt bridge failed: {exc}; filling zeros")
                         continue
+                    teacher_response_start_text = self._bridge_teacher_response_start_text(
+                        teacher_prompt_text,
+                        student_tokenizer.decode(student_resp_ids, skip_special_tokens=False),
+                    )
                     teacher_resp_start_tok = len(
-                        teacher_tokenizer(teacher_prompt_text, add_special_tokens=False)["input_ids"]
+                        teacher_tokenizer(teacher_response_start_text, add_special_tokens=False)["input_ids"]
                     )
                     teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
                     if teacher_resp_start_tok >= len(teacher_ids_no_gen):
