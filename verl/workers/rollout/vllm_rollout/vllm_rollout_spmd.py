@@ -268,12 +268,15 @@ class vLLMRollout(BaseRollout):
             repetition_penalty=config.get("repetition_penalty", 1.0),
         )
 
-        kwargs["detokenize"] = False
-
         # supporting adding any sampling params from the config file
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)) and k != "seed":
                 kwargs[k] = config.get(k)
+        # vLLM needs detokenization enabled to detect decoded-text stop
+        # sequences such as lllm's multi-token </answer> terminator. We still
+        # consume token_ids below, so enabling it only when a stop string is
+        # configured preserves the old fast path for every other rollout.
+        kwargs["detokenize"] = bool(kwargs.get("stop"))
         kwargs["n"] = 1  # already repeat in ray_trainer
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)

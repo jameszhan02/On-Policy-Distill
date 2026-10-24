@@ -1,3 +1,5 @@
+import torch
+
 from examples.data_preprocess.gsm8k_r1_zero import R1_ZERO_LLAMA_TEMPLATE, build_prompt
 from verl.workers.reward_manager.opd import TeacherClient
 
@@ -7,6 +9,22 @@ class _TokenizerStub:
         self.bos_token = bos_token
         self.eos_token = eos_token
         self.additional_special_tokens = []
+
+
+class _PieceTokenizerStub:
+    """Tiny tokenizer whose teacher side fuses the space before ``<think>``."""
+
+    def __init__(self, pieces: dict[int, str], prompt_ids: list[int] | None = None):
+        self.pieces = pieces
+        self.prompt_ids = prompt_ids
+
+    def __call__(self, text: str, add_special_tokens: bool = False):
+        assert not add_special_tokens
+        assert self.prompt_ids is not None
+        return {"input_ids": self.prompt_ids}
+
+    def decode(self, ids, skip_special_tokens: bool = False):
+        return "".join(self.pieces[token_id] for token_id in ids)
 
 
 def _client() -> TeacherClient:
@@ -69,3 +87,33 @@ def test_unformatted_student_response_aligns_after_teacher_prefill():
     )
 
     assert response_start_text == teacher_prompt
+
+
+def test_fused_space_think_boundary_is_found_and_aligns():
+    client = TeacherClient.__new__(TeacherClient)
+    client.prompt_bridge_mode = "r1_zero_llama_to_r1_zero"
+    client.tokenizer = _PieceTokenizerStub(
+        {10: "prefix", 11: " <", 12: "think", 13: ">", 14: "work"},
+        prompt_ids=[10, 11, 12, 13],
+    )
+    student_tokenizer = _PieceTokenizerStub({1: "<", 2: "think", 3: ">", 4: "work"})
+
+    response_start, ignore_space = client._bridge_teacher_response_start_tok(
+        "prefix <think>", "<think>work"
+    )
+
+    assert response_start == 1
+    assert ignore_space is True
+
+    _, _, _, truncated, stats = TeacherClient._align_chunks(
+        [1, 2, 3, 4],
+        [11, 12, 13, 14],
+        torch.tensor([-1.0, -2.0, -3.0, -4.0]),
+        student_tokenizer,
+        client.tokenizer,
+        ignore_one_leading_teacher_space=ignore_space,
+    )
+
+    assert truncated is False
+    assert stats["matched_student_tokens"] == 4
+    assert stats["trainable_student_tokens"] == 4

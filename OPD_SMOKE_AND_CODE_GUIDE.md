@@ -209,6 +209,14 @@ OPD_TOKENIZER_DEBUG=1 \
 ray start --head --num-gpus=1 --include-dashboard=false
 ```
 
+For this bridge, `cross_distill_smoke_1gpu.sh` automatically stops student
+rollouts at `</answer>` and keeps the closing tag in the returned response,
+matching lllm's `r1_zero_llama` generation behavior. `OPD_SUPERVISE_EOS=0`
+only disables the teacher EOS loss; it does not control rollout termination.
+Set `DISABLE_INITIAL_VALIDATION=1` on the training command to skip the full
+validation rollout before step 1. Periodic validation still follows
+`TEST_FREQ`.
+
 Do not set the old `OPD_TEACHER_PROMPT='{question}'` override for this route.
 The bridge has the exact lllm `r1_zero.prompt` text built in. Alternatively,
 set `OPD_TEACHER_PROMPT_PATH` to that prompt file. The smoke script generates
@@ -245,6 +253,7 @@ R1_ZERO_MODE=0 \
 OPD_PROMPT_BRIDGE_MODE=r1_zero_llama_to_r1_zero \
 VERL_GSM8K_EVAL_PROMPT_TYPE=r1_zero_llama \
 OPD_SUPERVISE_EOS=0 \
+DISABLE_INITIAL_VALIDATION=1 \
 OPD_TOKENIZER_DEBUG=1 \
 RESTART_RAY=1 \
 ENABLE_ACTIVATION_OFFLOAD=True \

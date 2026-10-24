@@ -814,6 +814,41 @@ class TeacherClient:
             return teacher_prompt_text[:-len("<think>")]
         return teacher_prompt_text
 
+    def _bridge_teacher_response_start_tok(
+        self, teacher_prompt_text: str, student_response_text: str
+    ) -> tuple[int, bool]:
+        """Locate the teacher response in its *actual* prompt tokenization.
+
+        The r1_zero teacher prompt ends in ``" <think>"``. Tokenizers such as
+        OLMo fuse the space and opening angle bracket into one ``" <"`` token,
+        so deleting the seven characters ``"<think>"`` and re-tokenizing the
+        shorter prefix loses the ``"<"`` at the response boundary. Locate the
+        complete tag as a suffix of the tokenized prompt instead.
+
+        Returns ``(token_index, ignore_one_leading_teacher_space)``. The latter
+        lets chunk alignment equate teacher ``" <think>"`` with student
+        ``"<think>"`` without changing the exact lllm teacher prompt.
+        """
+        prompt_ids = self.tokenizer(teacher_prompt_text, add_special_tokens=False)["input_ids"]
+        if not (
+            self._uses_r1_zero_llama_bridge()
+            and teacher_prompt_text.endswith("<think>")
+            and student_response_text.startswith("<think>")
+        ):
+            return len(prompt_ids), False
+
+        max_suffix_tokens = min(len(prompt_ids), 16)
+        for width in range(1, max_suffix_tokens + 1):
+            suffix = self.tokenizer.decode(prompt_ids[-width:], skip_special_tokens=False)
+            if suffix == "<think>":
+                return len(prompt_ids) - width, False
+            if suffix == " <think>":
+                return len(prompt_ids) - width, True
+        raise ValueError(
+            "Cannot locate the teacher prompt's terminal '<think>' token span; "
+            "refusing to silently produce an unaligned OPD batch."
+        )
+
     def retokenize_batch(self, batch):
         """Convert a batch of student token ID sequences to teacher token ID sequences.
 
@@ -907,7 +942,8 @@ class TeacherClient:
     @staticmethod
     def _align_chunks(student_ids, teacher_ids, teacher_logps,
                       student_tokenizer, teacher_tokenizer, debug=False,
-                      large_chunk_threshold=6):
+                      large_chunk_threshold=6,
+                      ignore_one_leading_teacher_space=False):
         """Align teacher logprobs to student token granularity via chunk-level greedy matching.
 
         Both student_ids and teacher_ids should be the *response content only*
@@ -978,7 +1014,17 @@ class TeacherClient:
                 s_text = unicodedata.normalize('NFC', student_tokenizer.decode(student_ids[s_ptr:s_end], skip_special_tokens=False))
                 t_text = unicodedata.normalize('NFC', teacher_tokenizer.decode(teacher_ids[t_ptr:t_end], skip_special_tokens=False))
 
-                if s_text == t_text and not s_text.endswith('\ufffd'):
+                s_compare = s_text
+                t_compare = t_text
+                if (
+                    ignore_one_leading_teacher_space
+                    and s_ptr == 0
+                    and t_ptr == 0
+                    and t_compare.startswith(" ")
+                ):
+                    t_compare = t_compare[1:]
+
+                if s_compare == t_compare and not s_compare.endswith('\ufffd'):
                     # Chunk boundary found
                     n_stu_tokens = s_end - s_ptr
                     n_tec_tokens = t_end - t_ptr
@@ -1056,12 +1102,12 @@ class TeacherClient:
                 # Track previous pointers to detect stuck state
                 s_end_prev, t_end_prev = s_end, t_end
 
-                if len(s_text) < len(t_text):
+                if len(s_compare) < len(t_compare):
                     if s_end < n_stu:
                         s_end += 1
                     else:
                         t_end += 1
-                elif len(s_text) > len(t_text):
+                elif len(s_compare) > len(t_compare):
                     if t_end < n_tec:
                         t_end += 1
                     else:
@@ -1684,13 +1730,19 @@ class TeacherClient:
                     except ValueError as exc:
                         warnings.warn(f"[align seq {i}] prompt bridge failed: {exc}; filling zeros")
                         continue
-                    teacher_response_start_text = self._bridge_teacher_response_start_text(
-                        teacher_prompt_text,
-                        student_tokenizer.decode(student_resp_ids, skip_special_tokens=False),
+                    student_response_text = student_tokenizer.decode(
+                        student_resp_ids, skip_special_tokens=False
                     )
-                    teacher_resp_start_tok = len(
-                        teacher_tokenizer(teacher_response_start_text, add_special_tokens=False)["input_ids"]
-                    )
+                    try:
+                        (
+                            teacher_resp_start_tok,
+                            ignore_one_leading_teacher_space,
+                        ) = self._bridge_teacher_response_start_tok(
+                            teacher_prompt_text, student_response_text
+                        )
+                    except ValueError as exc:
+                        warnings.warn(f"[align seq {i}] prompt bridge boundary failed: {exc}; filling zeros")
+                        continue
                     teacher_full_text = teacher_tokenizer.decode(teacher_ids_no_gen, skip_special_tokens=False)
                     if teacher_resp_start_tok >= len(teacher_ids_no_gen):
                         warnings.warn(
@@ -1817,6 +1869,11 @@ class TeacherClient:
                     teacher_tokenizer,
                     debug=_do_dump_this_seq,
                     large_chunk_threshold=self.large_chunk_threshold,
+                    ignore_one_leading_teacher_space=(
+                        prompt_bridge_mode
+                        and self._uses_r1_zero_llama_bridge()
+                        and ignore_one_leading_teacher_space
+                    ),
                 )
                 alignment_stats[i] = seq_alignment_stats
 

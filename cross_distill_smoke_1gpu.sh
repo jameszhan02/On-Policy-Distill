@@ -92,6 +92,13 @@ total_training_steps=${TOTAL_TRAINING_STEPS:-1500}
 test_freq=${TEST_FREQ:-100}
 save_freq=${SAVE_FREQ:-100}
 val_before_train=${VAL_BEFORE_TRAIN:-True}
+# Fast debug runs can skip the expensive full validation rollout before step 1.
+# This explicit switch takes precedence over VAL_BEFORE_TRAIN so callers do not
+# need to remember Hydra's boolean spelling.
+disable_initial_validation=${DISABLE_INITIAL_VALIDATION:-0}
+case "${disable_initial_validation,,}" in
+    1|true|yes|on) val_before_train=False ;;
+esac
 # Was 2e-7: the repo's own real-scale config (cross_distill.sh) pairs lr=1e-6
 # with train_prompt_bsz=128 -- a ~5x LR bump for a ~16x batch bump (sub-linear
 # scaling, not full linear). At train_prompt_bsz going from 8 (an env override
@@ -258,6 +265,15 @@ if [[ "${R1_ZERO_MODE}" == "1" ]] || (( r1_zero_llama_bridge )); then
     # not overriding an existing one -- Hydra's own error message for the
     # plain "=" form says so directly.
     EXTRA_HYDRA_ARGS+=("+data.apply_chat_template_kwargs.chat_template=${r1_zero_chat_template}")
+fi
+if (( r1_zero_llama_bridge )); then
+    # lllm's r1_zero_llama policy is trained/evaluated with </answer> as its
+    # stop sequence. It is not guaranteed to emit the tokenizer EOS because
+    # lllm stops generation as soon as the closing answer tag is produced.
+    # Keep the stop text in the rollout so format grading and OPD alignment see
+    # the complete closing tag.
+    EXTRA_HYDRA_ARGS+=('actor_rollout_ref.rollout.stop=["</answer>"]')
+    EXTRA_HYDRA_ARGS+=('actor_rollout_ref.rollout.include_stop_str_in_output=True')
 fi
 
 if [[ "${RESTART_RAY:-0}" == "1" ]]; then

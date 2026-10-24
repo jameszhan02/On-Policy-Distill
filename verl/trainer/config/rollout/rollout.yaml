@@ -16,6 +16,11 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# Optional decoded-text stop sequences. Keep the matched sequence in the
+# response when downstream format grading/alignment needs to observe it.
+stop: null
+include_stop_str_in_output: false
+
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
@@ -140,6 +145,10 @@ val_kwargs:
 
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
+
+  # Validation inherits the rollout stop sequence unless explicitly changed.
+  stop: null
+  include_stop_str_in_output: false
 
   # Max number of tokens generated when validate
   max_tokens: 16384
