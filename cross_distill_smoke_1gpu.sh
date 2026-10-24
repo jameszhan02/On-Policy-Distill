@@ -145,12 +145,11 @@ if [[ "${OPD_PROMPT_BRIDGE_MODE}" == "r1_zero_llama_to_r1_zero" || \
       "${OPD_PROMPT_BRIDGE_MODE}" == "r1zero_llama_to_r1zero" ]]; then
     r1_zero_llama_bridge=1
 fi
-if (( r1_zero_llama_bridge )); then
-    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_llama/train.parquet"}
-    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_llama/test.parquet"}
-elif [[ "${R1_ZERO_MODE}" == "1" ]]; then
-    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/train.parquet"}
-    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero/test.parquet"}
+if (( r1_zero_llama_bridge )) || [[ "${R1_ZERO_MODE}" == "1" ]]; then
+    # r1_zero_llama is now only a compatibility name. Both modes consume the
+    # same canonical prompt dataset and differ only in teacher adaptation.
+    TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_canonical/train.parquet"}
+    TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k_r1zero_canonical/test.parquet"}
 else
     TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/smoke/train.parquet"}
     TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/smoke/val.parquet"}
@@ -187,7 +186,7 @@ export OPD_EOS_IGNORE_NEG_AFTER_TOKENS=${OPD_EOS_IGNORE_NEG_AFTER_TOKENS:-"0"}
 export OPD_EOS_IGNORE_NEG_AFTER_RATIO=${OPD_EOS_IGNORE_NEG_AFTER_RATIO:-""}
 export OPD_EOS_NEG_SKIP_THRESHOLD=${OPD_EOS_NEG_SKIP_THRESHOLD:-"-2.0"}
 if (( r1_zero_llama_bridge )); then
-    export VERL_GSM8K_EVAL_PROMPT_TYPE=${VERL_GSM8K_EVAL_PROMPT_TYPE:-"r1_zero_llama"}
+    export VERL_GSM8K_EVAL_PROMPT_TYPE=${VERL_GSM8K_EVAL_PROMPT_TYPE:-"r1_zero"}
 fi
 
 # Keep the terminal useful during debugging: show one student rollout and only
@@ -234,12 +233,10 @@ rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
 max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS:-$((max_num_seqs * student_max_seq_len))}
 
 if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
-    if (( r1_zero_llama_bridge )); then
+    if (( r1_zero_llama_bridge )) || [[ "${R1_ZERO_MODE}" == "1" ]]; then
         "${PYTHON_BIN}" examples/data_preprocess/gsm8k_r1_zero.py \
-            --prompt-variant r1_zero_llama \
-            --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero_llama"
-    elif [[ "${R1_ZERO_MODE}" == "1" ]]; then
-        "${PYTHON_BIN}" examples/data_preprocess/gsm8k_r1_zero.py --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero"
+            --prompt-variant r1_zero \
+            --local_save_dir "${RAY_DATA_HOME}/gsm8k_r1zero_canonical"
     else
         "${PYTHON_BIN}" examples/data_preprocess/create_opd_smoke_data.py --output-dir "${RAY_DATA_HOME}/smoke"
     fi

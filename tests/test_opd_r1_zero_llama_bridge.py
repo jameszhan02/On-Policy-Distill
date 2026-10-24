@@ -1,7 +1,19 @@
 import torch
 
-from examples.data_preprocess.gsm8k_r1_zero import R1_ZERO_LLAMA_TEMPLATE, build_prompt
+from examples.data_preprocess.gsm8k_r1_zero import R1_ZERO_LLAMA_TEMPLATE, R1_ZERO_TEMPLATE, build_prompt
 from verl.workers.reward_manager.opd import TeacherClient
+
+
+# Historical non-prefilled student prompt used only to verify migration of old
+# checkpoints. New SFT/RL data uses the canonical prefilled template above.
+_LEGACY_UNPREFIXED_TEMPLATE = (
+    "A conversation between User and Assistant. The User asks a math question, and the Assistant solves it. "
+    "The Assistant must write its reasoning between <think> and </think>, then write only the final answer "
+    "between <answer> and </answer>. The complete response must use this form: "
+    "<think> reasoning process here </think> <answer> final answer here </answer>.\n"
+    "User: {question}\n"
+    "Assistant:\n"
+)
 
 
 class _TokenizerStub:
@@ -47,14 +59,21 @@ def test_r1_zero_llama_dataset_prompt_is_raw_lllm_template():
     question = "What is 1 + 1?"
     prompt = build_prompt(question, "r1_zero_llama")
     assert prompt == [{"role": "user", "content": R1_ZERO_LLAMA_TEMPLATE.format(question=question)}]
-    assert prompt[0]["content"].endswith("Assistant:\n")
+    assert prompt[0]["content"].endswith("Assistant: <think>")
+
+
+def test_r1_zero_and_legacy_llama_name_render_the_same_prompt():
+    question = "What is 2 + 3?"
+
+    assert R1_ZERO_TEMPLATE == R1_ZERO_LLAMA_TEMPLATE
+    assert build_prompt(question, "r1_zero") == build_prompt(question, "r1_zero_llama")
 
 
 def test_bridge_keeps_one_think_and_translates_terminal_token():
     client = _client()
     student_text = (
         "<s>"
-        + R1_ZERO_LLAMA_TEMPLATE.format(question="What is 1 + 1?")
+        + _LEGACY_UNPREFIXED_TEMPLATE.format(question="What is 1 + 1?")
         + "<think>1 + 1 = 2.</think> <answer>2</answer></s>"
     )
 
@@ -68,7 +87,7 @@ def test_bridge_keeps_one_think_and_translates_terminal_token():
 
 def test_prefilled_think_is_inside_teacher_alignment_response():
     client = _client()
-    student_prompt = "<s>" + R1_ZERO_LLAMA_TEMPLATE.format(question="What is 1 + 1?")
+    student_prompt = "<s>" + _LEGACY_UNPREFIXED_TEMPLATE.format(question="What is 1 + 1?")
     teacher_prompt = client._build_bridge_teacher_prompt(student_prompt)
 
     response_start_text = client._bridge_teacher_response_start_text(teacher_prompt)
@@ -79,7 +98,7 @@ def test_prefilled_think_is_inside_teacher_alignment_response():
 
 def test_unformatted_student_response_aligns_after_teacher_prefill():
     client = _client()
-    student_prompt = "<s>" + R1_ZERO_LLAMA_TEMPLATE.format(question="What is 1 + 1?")
+    student_prompt = "<s>" + _LEGACY_UNPREFIXED_TEMPLATE.format(question="What is 1 + 1?")
     teacher_prompt = client._build_bridge_teacher_prompt(student_prompt)
 
     response_start_text = client._bridge_teacher_response_start_text(
