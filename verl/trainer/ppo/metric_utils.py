@@ -277,6 +277,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "fallback_student_tokens": "opd_alignment_fallback_student_tokens",
         "large_chunk_student_tokens": "opd_alignment_large_chunk_student_tokens",
         "truncated_student_tokens": "opd_alignment_truncated_student_tokens",
+        "clipped_tail_student_tokens": "opd_alignment_clipped_tail_student_tokens",
     }
     if all(key in batch.non_tensor_batch for key in alignment_keys.values()):
         totals = {
@@ -314,6 +315,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 ),
                 "opd_alignment/large_chunk_student_token_ratio": (
                     totals["large_chunk_student_tokens"] / totals["response_student_tokens"]
+                    if totals["response_student_tokens"] else 0.0
+                ),
+                "opd_alignment/clipped_tail_student_token_ratio": (
+                    totals["clipped_tail_student_tokens"] / totals["response_student_tokens"]
                     if totals["response_student_tokens"] else 0.0
                 ),
                 "opd_alignment/student_tokens_per_trainable_chunk": (

@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 
 from examples.data_preprocess.gsm8k_r1_zero import R1_ZERO_LLAMA_TEMPLATE, R1_ZERO_TEMPLATE, build_prompt
+from verl.trainer.ppo.core_algos import compute_policy_loss_opd
 from verl.workers.reward_manager.opd import TeacherClient
 
 
@@ -56,6 +57,19 @@ class _ContextSensitiveTokenizerStub(_PieceTokenizerStub):
         if self.unstable_id is not None and ids and ids[-1] == self.unstable_id:
             return text[:-1] + "\ufffd"
         return text
+
+
+class _PolicyLossConfig(dict):
+    clip_ratio = 0.2
+    clip_ratio_low = 0.2
+    clip_ratio_high = 0.28
+    global_batch_info = {}
+
+    def __init__(self):
+        super().__init__(
+            clip_ratio_c=10.0,
+            policy_loss={"opd_loss_max_clamp": 2.0},
+        )
 
 
 def _client() -> TeacherClient:
@@ -315,3 +329,24 @@ def test_raw_boundary_recovery_keeps_prompt_response_fused_token():
     assert (chunk_ids >= 0).all()
     assert stats["matched_student_tokens"] == 3
     assert stats["fallback_student_tokens"] == 0
+
+
+def test_eos_chunk_never_receives_negative_opd_advantage():
+    old_log_prob = torch.tensor([[-0.1]])
+    current_log_prob = old_log_prob.clone()
+    # First half is the teacher EOS logprob; second half is the reserved EOS
+    # chunk ID. Without the terminal guard this produces a negative advantage.
+    teacher_and_chunk_ids = torch.tensor([[-2.0, -2.0]])
+
+    loss, metrics = compute_policy_loss_opd(
+        old_log_prob=old_log_prob,
+        log_prob=current_log_prob,
+        advantages=teacher_and_chunk_ids,
+        response_mask=torch.ones_like(old_log_prob),
+        config=_PolicyLossConfig(),
+    )
+
+    assert loss.item() == 0.0
+    assert metrics["actor/opd_eos_tokens"] == 1
+    assert metrics["actor/opd_eos_negative_suppressed"] == 1
+    assert metrics["actor/opd_eos_negative_suppressed_ratio"] == 1.0

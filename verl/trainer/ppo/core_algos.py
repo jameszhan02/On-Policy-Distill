@@ -34,6 +34,10 @@ from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
 
+
+_OPD_SENTINEL_CHUNK_ID = -1
+_OPD_EOS_CHUNK_ID = -2
+
 PolicyLossFn = Callable[
     [
         torch.Tensor,  # old_log_prob
@@ -1075,7 +1079,13 @@ def compute_policy_loss_opd(
             has_chunk_id_half = (
                 split >= response_length
                 and finite_chunk_ids.numel() > 0
-                and bool(((finite_chunk_ids == -1) | (finite_chunk_ids >= 0)).all().item())
+                and bool(
+                    (
+                        (finite_chunk_ids == _OPD_SENTINEL_CHUNK_ID)
+                        | (finite_chunk_ids == _OPD_EOS_CHUNK_ID)
+                        | (finite_chunk_ids >= 0)
+                    ).all().item()
+                )
                 and bool(torch.allclose(finite_chunk_ids, finite_chunk_ids.round()))
             )
             if has_chunk_id_half:
@@ -1085,8 +1095,10 @@ def compute_policy_loss_opd(
         # Special token positions are marked with inf sentinel (real logprobs ∈ (-inf, 0]).
         # Replace them with student logprobs so advantage = 0 → no loss contribution.
         sentinel_mask = torch.isinf(teacher_log_probs)
+        eos_chunk_mask = torch.zeros_like(sentinel_mask)
         if opd_chunk_ids is not None:
-            sentinel_mask = sentinel_mask | (opd_chunk_ids < 0)
+            sentinel_mask = sentinel_mask | (opd_chunk_ids == _OPD_SENTINEL_CHUNK_ID)
+            eos_chunk_mask = opd_chunk_ids == _OPD_EOS_CHUNK_ID
         # --- OPD metrics: count inf tokens in this micro-batch ---
         resp_mask_bool = response_mask.bool()
         opd_inf_tokens = int((sentinel_mask & resp_mask_bool).sum().item())
@@ -1138,6 +1150,24 @@ def compute_policy_loss_opd(
             opd_loss_max_clamp = policy_loss_cfg.get("opd_loss_max_clamp", None)
         if opd_loss_max_clamp is not None:
             advantages = torch.clamp(advantages, min=-opd_loss_max_clamp, max=opd_loss_max_clamp)
+
+        # Format-preserving terminal guard. Cross-tokenizer EOS logprobs are
+        # not calibrated against the student's EOS logprob, so a lower teacher
+        # value can otherwise train a well-formatted student not to stop. The
+        # teacher may reinforce EOS, but never suppress the student's existing
+        # stopping behavior. This is deliberately one-sided rather than a
+        # strong positive EOS bonus, avoiding premature empty answers.
+        eos_train_mask = eos_chunk_mask & resp_mask_bool & (~sentinel_mask)
+        opd_eos_tokens = int(eos_train_mask.sum().item())
+        opd_eos_negative_suppressed = int(
+            (eos_train_mask & (advantages < 0)).sum().item()
+        )
+        if eos_train_mask.any():
+            advantages = torch.where(
+                eos_train_mask,
+                torch.clamp_min(advantages, 0.0),
+                advantages,
+            )
 
         # # ---- DEBUG: write seq 0 per-token student logprobs and advantages to file ----
         # # Actor worker stdout is captured by Ray, so write to a file instead.
@@ -1271,6 +1301,11 @@ def compute_policy_loss_opd(
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
         "actor/opd_inf_tokens": opd_inf_tokens,
         "actor/opd_inf_ratio": opd_inf_ratio,
+        "actor/opd_eos_tokens": opd_eos_tokens,
+        "actor/opd_eos_negative_suppressed": opd_eos_negative_suppressed,
+        "actor/opd_eos_negative_suppressed_ratio": (
+            opd_eos_negative_suppressed / max(opd_eos_tokens, 1)
+        ),
     }
     return pg_loss, pg_metrics
 

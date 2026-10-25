@@ -89,6 +89,13 @@ OPD_EOS_IGNORE_NEG_AFTER_RATIO = (
     float(_OPD_EOS_IGNORE_NEG_AFTER_RATIO_RAW) if _OPD_EOS_IGNORE_NEG_AFTER_RATIO_RAW else None
 )
 OPD_EOS_NEG_SKIP_THRESHOLD = float(os.environ.get("OPD_EOS_NEG_SKIP_THRESHOLD", "-2.0"))
+OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS = int(
+    os.environ.get("OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS", "0")
+)
+# Reserved chunk ID transported alongside teacher logprobs. Core OPD treats
+# this as a trainable EOS position but clamps its advantage to >= 0, so the
+# teacher may reinforce stopping without eroding a student's existing format.
+OPD_EOS_CHUNK_ID = -2
 
 _DEFAULT_ALPACA_SYSTEM_PROMPT = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
 
@@ -450,7 +457,8 @@ class TeacherClient:
             f"[mode] OPD_EOS_LOGP_FLOOR={OPD_EOS_LOGP_FLOOR} "
             f"OPD_EOS_IGNORE_NEG_AFTER_TOKENS={OPD_EOS_IGNORE_NEG_AFTER_TOKENS} "
             f"OPD_EOS_IGNORE_NEG_AFTER_RATIO={OPD_EOS_IGNORE_NEG_AFTER_RATIO} "
-            f"OPD_EOS_NEG_SKIP_THRESHOLD={OPD_EOS_NEG_SKIP_THRESHOLD}",
+            f"OPD_EOS_NEG_SKIP_THRESHOLD={OPD_EOS_NEG_SKIP_THRESHOLD} "
+            f"OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS={OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS}",
             flush=True,
         )
         for label, tokenizer in (("student", self.student_tokenizer), ("teacher", self.tokenizer)):
@@ -1074,6 +1082,7 @@ class TeacherClient:
             "fallback_student_tokens": 0,
             "large_chunk_student_tokens": 0,
             "truncated_student_tokens": 0,
+            "clipped_tail_student_tokens": 0,
         }
 
         if n_stu == 0:
@@ -1833,6 +1842,7 @@ class TeacherClient:
                     "fallback_student_tokens": 0,
                     "large_chunk_student_tokens": 0,
                     "truncated_student_tokens": 0,
+                    "clipped_tail_student_tokens": 0,
                 }
                 for _ in range(local_batch_size)
             ]
@@ -1881,6 +1891,7 @@ class TeacherClient:
                         "fallback_student_tokens": 0,
                         "large_chunk_student_tokens": 0,
                         "truncated_student_tokens": 0,
+                        "clipped_tail_student_tokens": 0,
                     }
 
                     # Dump for same-tokenizer case
@@ -2264,6 +2275,50 @@ class TeacherClient:
                     ),
                     teacher_leading_text_to_strip=teacher_leading_text_to_strip,
                 )
+
+                # A max-length rollout has no sampled EOS, so on-policy
+                # actual-token distillation cannot teach the missing stop
+                # action. Do not let hundreds of continuation tokens dominate
+                # token-mean OPD. Keep the useful reasoning prefix and skip
+                # only the configured tail, beginning at a whole chunk
+                # boundary so chunk logprob accounting remains valid.
+                clipped_tail_start = None
+                response_budget = int(batch.batch["responses"].shape[-1])
+                is_clipped_without_terminal = (
+                    student_resp_end_tok == len(student_ids)
+                    and len(student_resp_ids) >= response_budget
+                )
+                if (
+                    OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS > 0
+                    and is_clipped_without_terminal
+                    and OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS < len(student_resp_ids)
+                ):
+                    clipped_tail_start = OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS
+                    crossing_chunk_id = int(aligned_chunk_ids[clipped_tail_start].item())
+                    if crossing_chunk_id >= 0:
+                        crossing_positions = (
+                            aligned_chunk_ids == crossing_chunk_id
+                        ).nonzero(as_tuple=True)[0]
+                        if len(crossing_positions) > 0:
+                            clipped_tail_start = int(crossing_positions[0].item())
+
+                    clipped_tail_mask = torch.zeros_like(
+                        aligned_chunk_ids, dtype=torch.bool
+                    )
+                    clipped_tail_mask[clipped_tail_start:] = True
+                    newly_skipped = clipped_tail_mask & (aligned_chunk_ids >= 0)
+                    n_clipped_tail = int(newly_skipped.sum().item())
+                    aligned_logps[clipped_tail_mask] = float("inf")
+                    aligned_chunk_ids[clipped_tail_mask] = -1.0
+                    seq_alignment_stats["clipped_tail_student_tokens"] = n_clipped_tail
+                    seq_alignment_stats["trainable_student_tokens"] = max(
+                        0,
+                        seq_alignment_stats["trainable_student_tokens"] - n_clipped_tail,
+                    )
+                    remaining_chunk_ids = aligned_chunk_ids[aligned_chunk_ids >= 0]
+                    seq_alignment_stats["trainable_chunks"] = int(
+                        torch.unique(remaining_chunk_ids).numel()
+                    )
                 alignment_stats[i] = seq_alignment_stats
 
                 # --- Dump alignment details ---
@@ -2275,6 +2330,7 @@ class TeacherClient:
                         "is_same_tokenizer": False,
                         "template_mapping": getattr(self, '_template_mapping', None),
                         "teacher_truncated": teacher_truncated,
+                        "clipped_tail_start": clipped_tail_start,
                         # Full text with chat template
                         "student_full_text": student_full_text,
                         "teacher_full_text": teacher_full_text,
@@ -2468,9 +2524,7 @@ class TeacherClient:
                     # First special token gets teacher's eos logprob
                     first_special_pos = valid_positions[sentinel_start]
                     teacher_topk_logps_padded[i, first_special_pos] = teacher_eos_logp
-                    teacher_chunk_ids_padded[i, first_special_pos] = (
-                        aligned_chunk_ids.max().item() + 1 if len(aligned_chunk_ids) > 0 else 0
-                    )
+                    teacher_chunk_ids_padded[i, first_special_pos] = OPD_EOS_CHUNK_ID
 
                     # Remaining special tokens (if any) get inf sentinel
                     if n_special > 1:
