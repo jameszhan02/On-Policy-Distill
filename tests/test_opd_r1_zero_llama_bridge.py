@@ -274,3 +274,44 @@ def test_alignment_resynchronizes_after_unstable_prefix_boundary():
     # The missing boundary at "ab" is absorbed into the next synchronized
     # chunk instead of making tokens c/d an untrainable fallback tail.
     assert stats["matched_chunks"] == 3
+
+
+def test_raw_boundary_recovery_keeps_prompt_response_fused_token():
+    teacher_tokenizer = _PieceTokenizerStub(
+        {
+            100: "prompt<",
+            10: "think>The",
+            20: " three",
+            30: " friends",
+        }
+    )
+    teacher_ids = [100, 10, 20, 30]
+
+    start, leading_text = TeacherClient._recover_teacher_response_boundary(
+        teacher_ids,
+        estimated_start=2,
+        response_end=4,
+        student_response_text="The three friends",
+        teacher_tokenizer=teacher_tokenizer,
+    )
+
+    assert start == 1
+    assert leading_text == "think>"
+
+    student_tokenizer = _PieceTokenizerStub(
+        {1: "The", 2: " three", 3: " friends"}
+    )
+    aligned, chunk_ids, _, truncated, stats = TeacherClient._align_chunks(
+        [1, 2, 3],
+        teacher_ids[start:4],
+        torch.tensor([-1.0, -2.0, -3.0]),
+        student_tokenizer,
+        teacher_tokenizer,
+        teacher_leading_text_to_strip=leading_text,
+    )
+
+    assert truncated is False
+    assert torch.isfinite(aligned).all()
+    assert (chunk_ids >= 0).all()
+    assert stats["matched_student_tokens"] == 3
+    assert stats["fallback_student_tokens"] == 0

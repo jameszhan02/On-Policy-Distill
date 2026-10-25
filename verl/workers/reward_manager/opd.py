@@ -1004,10 +1004,49 @@ class TeacherClient:
         return input_id_list
 
     @staticmethod
+    def _recover_teacher_response_boundary(
+        teacher_ids,
+        estimated_start,
+        response_end,
+        student_response_text,
+        teacher_tokenizer,
+        search_back_tokens=16,
+    ):
+        """Recover a response boundary fused across prompt and response text.
+
+        Encoding ``prompt`` alone can use one more token than encoding
+        ``prompt + response`` when the tokenizer fuses the prompt suffix with
+        the first response characters.  In that case ``estimated_start``
+        points after the fused token and silently drops response text.  Search
+        a small window backwards for the latest token slice whose decoded text
+        ends with the exact student response.  Return both its token index and
+        the prompt-only leading text that must be ignored during alignment.
+        """
+        target = unicodedata.normalize("NFC", student_response_text)
+        if not target:
+            return estimated_start, ""
+
+        upper = min(max(int(estimated_start), 0), int(response_end))
+        lower = max(0, upper - max(int(search_back_tokens), 0))
+        for start in range(upper, lower - 1, -1):
+            candidate = unicodedata.normalize(
+                "NFC",
+                teacher_tokenizer.decode(
+                    teacher_ids[start:response_end],
+                    skip_special_tokens=False,
+                ),
+            )
+            if candidate.endswith(target):
+                return start, candidate[:-len(target)]
+
+        return estimated_start, ""
+
+    @staticmethod
     def _align_chunks(student_ids, teacher_ids, teacher_logps,
                       student_tokenizer, teacher_tokenizer, debug=False,
                       large_chunk_threshold=6,
-                      ignore_one_leading_teacher_space=False):
+                      ignore_one_leading_teacher_space=False,
+                      teacher_leading_text_to_strip=""):
         """Align cross-tokenizer responses at shared decoded-prefix boundaries.
 
         Decoding a middle token slice is not compositional for every tokenizer:
@@ -1057,17 +1096,27 @@ class TeacherClient:
                 text = tokenizer.decode(ids, skip_special_tokens=False)
             return unicodedata.normalize("NFC", text)
 
-        def prefix_boundaries(ids, tokenizer, strip_one_leading_space=False):
+        def prefix_boundaries(ids, tokenizer, leading_text_to_strip=""):
             full_text = decode(ids, tokenizer)
-            if strip_one_leading_space and full_text.startswith(" "):
-                full_text = full_text[1:]
+
+            def strip_leading_text(text):
+                if not leading_text_to_strip:
+                    return text
+                if text.startswith(leading_text_to_strip):
+                    return text[len(leading_text_to_strip):]
+                # A prefix may contain only the beginning of the prompt-only
+                # fragment. It contributes no response characters yet.
+                if leading_text_to_strip.startswith(text):
+                    return ""
+                return text
+
+            full_text = strip_leading_text(full_text)
 
             # normalized character offset -> number of consumed tokens
             boundaries = {0: 0}
             for end in range(1, len(ids) + 1):
                 prefix = decode(ids[:end], tokenizer)
-                if strip_one_leading_space and prefix.startswith(" "):
-                    prefix = prefix[1:]
+                prefix = strip_leading_text(prefix)
                 # A partial byte sequence is not a stable boundary.  A later
                 # prefix normally replaces U+FFFD with the completed character.
                 if prefix.endswith("\ufffd"):
@@ -1085,10 +1134,12 @@ class TeacherClient:
         student_text, student_boundaries = prefix_boundaries(
             student_ids, student_tokenizer
         )
+        if ignore_one_leading_teacher_space and not teacher_leading_text_to_strip:
+            teacher_leading_text_to_strip = " "
         teacher_text, teacher_boundaries = prefix_boundaries(
             teacher_ids,
             teacher_tokenizer,
-            strip_one_leading_space=ignore_one_leading_teacher_space,
+            leading_text_to_strip=teacher_leading_text_to_strip,
         )
 
         # Only equal decoded prefixes are synchronization points.  If the full
@@ -1100,8 +1151,8 @@ class TeacherClient:
             if offset > 0 and student_text[:offset] == teacher_text[:offset]
         ]
 
-        s_ptr = 0
-        t_ptr = 0
+        s_ptr = student_boundaries.get(0, 0)
+        t_ptr = teacher_boundaries.get(0, 0)
         text_ptr = 0
         chunk_count = 0
         for offset in shared_offsets:
@@ -1930,6 +1981,7 @@ class TeacherClient:
             for i in range(local_batch_size):
                 student_ids = input_ids[i]  # list[int], student prompt+response
                 teacher_ids = responses[i].tolist()  # list[int], teacher prompt+response+1 generated token
+                teacher_leading_text_to_strip = ""
                 teacher_logps, teacher_selected_columns = self._select_actual_teacher_logps(
                     teacher_ids,
                     teacher_topk_logps[i],
@@ -2095,6 +2147,28 @@ class TeacherClient:
                 while teacher_resp_end_tok > teacher_resp_start_tok and teacher_ids_no_gen[teacher_resp_end_tok - 1] in teacher_special_end_ids:
                     teacher_resp_end_tok -= 1
 
+                if R1_ZERO_MODE:
+                    # The separately tokenized prompt length can point one
+                    # token too far into the response when the teacher fuses
+                    # the prompt suffix (typically ``<think>``) with the first
+                    # generated characters. Recover the actual boundary from
+                    # the exact student response and retain the fused token's
+                    # logprob for supervision.
+                    student_response_text = student_tokenizer.decode(
+                        student_resp_ids,
+                        skip_special_tokens=False,
+                    )
+                    (
+                        teacher_resp_start_tok,
+                        teacher_leading_text_to_strip,
+                    ) = self._recover_teacher_response_boundary(
+                        teacher_ids_no_gen,
+                        teacher_resp_start_tok,
+                        teacher_resp_end_tok,
+                        student_response_text,
+                        teacher_tokenizer,
+                    )
+
                 teacher_resp_ids = teacher_ids_no_gen[teacher_resp_start_tok:teacher_resp_end_tok]
 
                 # Compact runtime audit for the same number of samples shown by
@@ -2188,6 +2262,7 @@ class TeacherClient:
                         and self._uses_r1_zero_llama_bridge()
                         and ignore_one_leading_teacher_space
                     ),
+                    teacher_leading_text_to_strip=teacher_leading_text_to_strip,
                 )
                 alignment_stats[i] = seq_alignment_stats
 
@@ -2208,6 +2283,7 @@ class TeacherClient:
                         "student_resp_end_tok": student_resp_end_tok,
                         "teacher_resp_start_tok": teacher_resp_start_tok,
                         "teacher_resp_end_tok": teacher_resp_end_tok,
+                        "teacher_leading_text_to_strip": teacher_leading_text_to_strip,
                         # Explicit terminal-token audit. Token IDs are expected
                         # to differ across tokenizer families; the important
                         # invariant is that teacher_eos_logp_index predicts the
@@ -2264,6 +2340,15 @@ class TeacherClient:
                         # Response text
                         "student_resp_text": student_tokenizer.decode(student_resp_ids, skip_special_tokens=False),
                         "teacher_resp_text": teacher_tokenizer.decode(teacher_resp_ids, skip_special_tokens=False),
+                        "teacher_alignment_resp_text": (
+                            teacher_tokenizer.decode(
+                                teacher_resp_ids, skip_special_tokens=False
+                            )[len(teacher_leading_text_to_strip):]
+                            if teacher_leading_text_to_strip
+                            else teacher_tokenizer.decode(
+                                teacher_resp_ids, skip_special_tokens=False
+                            )
+                        ),
                         # Token counts
                         "student_resp_token_count": len(student_resp_ids),
                         "teacher_resp_token_count": len(teacher_resp_ids),
