@@ -145,6 +145,10 @@ if [[ "${OPD_PROMPT_BRIDGE_MODE}" == "r1_zero_llama_to_r1_zero" || \
       "${OPD_PROMPT_BRIDGE_MODE}" == "r1zero_llama_to_r1zero" ]]; then
     r1_zero_llama_bridge=1
 fi
+if [[ "${R1_ZERO_MODE}" == "1" && -n "${OPD_PROMPT_BRIDGE_MODE}" ]]; then
+    echo "R1_ZERO_MODE=1 uses an exact raw prompt and cannot be combined with OPD_PROMPT_BRIDGE_MODE." >&2
+    exit 1
+fi
 if (( r1_zero_llama_bridge )) || [[ "${R1_ZERO_MODE}" == "1" ]]; then
     # r1_zero_llama is now only a compatibility name. Both modes consume the
     # same canonical prompt dataset and differ only in teacher adaptation.
@@ -243,8 +247,10 @@ if [[ ! -f "${TRAIN_FILE}" || ! -f "${TEST_FILE}" ]]; then
 fi
 
 # Raw passthrough chat_template: renders a single-user-turn `messages` list as
-# literally "{bos_token}{content}" -- no role headers, no <|eot_id|>/<|im_end|>
-# etc. baked into the PROMPT side by either tokenizer's own native template.
+# literally "{content}" -- no BOS and no role headers, <|eot_id|>/<|im_end|>,
+# etc. baked into the prompt. lllm's LTokenizer.encode() does not implicitly
+# prepend BOS during SFT or rollout generation, so adding bos_token here makes
+# an otherwise identical R1-Zero prompt token-wise different from lllm.
 #
 # The leading/trailing \" are load-bearing, not decorative: Hydra's own CLI
 # override grammar tries to parse any value starting with "{" as a structured
@@ -254,7 +260,7 @@ fi
 # forces Hydra to treat it as an opaque string instead. Single quotes for the
 # dict key inside are safe precisely because they're not Hydra's quote
 # character.
-r1_zero_chat_template="\"{{ bos_token }}{{ messages[0]['content'] }}\""
+r1_zero_chat_template="\"{{ messages[0]['content'] }}\""
 EXTRA_HYDRA_ARGS=()
 if [[ "${R1_ZERO_MODE}" == "1" ]] || (( r1_zero_llama_bridge )); then
     # "+" (not plain "=") is required: apply_chat_template_kwargs starts as an

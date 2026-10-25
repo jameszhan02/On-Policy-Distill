@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 
 from examples.data_preprocess.gsm8k_r1_zero import R1_ZERO_LLAMA_TEMPLATE, R1_ZERO_TEMPLATE, build_prompt
@@ -67,6 +69,33 @@ def test_r1_zero_and_legacy_llama_name_render_the_same_prompt():
 
     assert R1_ZERO_TEMPLATE == R1_ZERO_LLAMA_TEMPLATE
     assert build_prompt(question, "r1_zero") == build_prompt(question, "r1_zero_llama")
+
+
+def test_raw_r1_zero_chat_template_does_not_prepend_bos():
+    script = (Path(__file__).parents[1] / "cross_distill_smoke_1gpu.sh").read_text(encoding="utf-8")
+
+    assert 'r1_zero_chat_template="\\"{{ messages[0][\'content\'] }}\\""' in script
+    assert "{{ bos_token }}{{ messages[0]['content'] }}" not in script
+    assert "cannot be combined with OPD_PROMPT_BRIDGE_MODE" in script
+
+
+def test_raw_mode_does_not_invent_teacher_bos_and_translates_eos():
+    client = _client()
+
+    teacher_text = client._swap_bos_eos_for_teacher(
+        "A conversation between User and Assistant.</answer></s>"
+    )
+
+    assert teacher_text == "A conversation between User and Assistant.</answer><teacher-eos>"
+    assert not teacher_text.startswith("<teacher-bos>")
+
+
+def test_raw_mode_replaces_bos_only_when_student_sequence_has_one():
+    client = _client()
+
+    teacher_text = client._swap_bos_eos_for_teacher("<s>prompt</s>")
+
+    assert teacher_text == "<teacher-bos>prompt<teacher-eos>"
 
 
 def test_bridge_keeps_one_think_and_translates_terminal_token():

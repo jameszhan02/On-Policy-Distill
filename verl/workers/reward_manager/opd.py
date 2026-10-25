@@ -212,6 +212,11 @@ class TeacherClient:
         self._tokenizer_debug_printed = False
         self.last_alignment_stats = []
         self.prompt_bridge_mode = OPD_PROMPT_BRIDGE_MODE
+        if R1_ZERO_MODE and self.prompt_bridge_mode:
+            raise ValueError(
+                "R1_ZERO_MODE and OPD_PROMPT_BRIDGE_MODE are mutually exclusive: "
+                "raw R1-Zero preserves one exact prompt, while a bridge rewrites it."
+            )
         raw_llama_bridge = self._uses_r1_zero_llama_bridge()
         self._bridge_teacher_system_prompt = self._load_prompt_template_from_env(
             "OPD_TEACHER_SYSTEM_PROMPT_PATH",
@@ -489,7 +494,9 @@ class TeacherClient:
             )
 
         print(f"[mapping] vocabularies_identical={same_tokenizer}", flush=True)
-        if self._uses_prompt_bridge():
+        if R1_ZERO_MODE:
+            print("[mapping] selected_route=raw_r1_zero_no_bos", flush=True)
+        elif self._uses_prompt_bridge():
             print(f"[mapping] selected_route=prompt_bridge_{self.prompt_bridge_mode}", flush=True)
             print(
                 f"[mapping] teacher_system_prompt={self._compact_template(self._bridge_teacher_system_prompt)}",
@@ -655,9 +662,13 @@ class TeacherClient:
             )
 
     def _swap_bos_eos_for_teacher(self, student_text: str) -> str:
-        """R1_ZERO_MODE only: swap the student tokenizer's own bos/eos strings
-        for the teacher tokenizer's, leaving everything else (the raw
-        r1_zero prompt text and the model's own response content) untouched.
+        """R1_ZERO_MODE only: translate BOS/EOS strings without inventing BOS.
+
+        lllm tokenizes its raw SFT and rollout prompts without implicitly
+        prepending BOS. Preserve that contract: replace a leading student BOS
+        only when it is actually present, and never synthesize a teacher BOS
+        for a BOS-less student sequence. The model response and raw R1-Zero
+        prompt text otherwise remain untouched.
 
         Safe to call repeatedly (memoizes the resolved token strings on self).
         """
@@ -681,8 +692,6 @@ class TeacherClient:
         teacher_text = student_text
         if student_bos and teacher_text.startswith(student_bos):
             teacher_text = teacher_bos + teacher_text[len(student_bos):]
-        elif teacher_bos:
-            teacher_text = teacher_bos + teacher_text
         if teacher_eos:
             for tok in student_eos_candidates:
                 if tok and tok != teacher_eos:
