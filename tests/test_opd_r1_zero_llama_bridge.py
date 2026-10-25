@@ -98,6 +98,46 @@ def test_raw_mode_replaces_bos_only_when_student_sequence_has_one():
     assert teacher_text == "<teacher-bos>prompt<teacher-eos>"
 
 
+def test_teacher_logprobs_are_selected_by_actual_token_id_not_column_zero():
+    teacher_ids = [10, 20, 30, 40]
+    topk_logps = torch.tensor(
+        [
+            [-0.1, -2.0],
+            [-3.0, -0.2],
+            [-0.3, -4.0],
+        ]
+    )
+    topk_indices = torch.tensor(
+        [
+            [99, 20],
+            [30, 98],
+            [97, 40],
+        ],
+        dtype=torch.int32,
+    )
+
+    selected, columns = TeacherClient._select_actual_teacher_logps(
+        teacher_ids, topk_logps, topk_indices
+    )
+
+    assert torch.equal(selected, torch.tensor([-2.0, -3.0, -4.0]))
+    assert torch.equal(columns, torch.tensor([1, 0, 1]))
+
+
+def test_teacher_logprob_selection_fails_when_actual_token_is_missing():
+    try:
+        TeacherClient._select_actual_teacher_logps(
+            [10, 20],
+            torch.tensor([[-0.1, -0.2]]),
+            torch.tensor([[98, 99]], dtype=torch.int32),
+        )
+    except RuntimeError as exc:
+        assert "actual sequence token" in str(exc)
+        assert "target_id" in str(exc)
+    else:
+        raise AssertionError("missing actual teacher token must fail closed")
+
+
 def test_bridge_keeps_one_think_and_translates_terminal_token():
     client = _client()
     student_text = (

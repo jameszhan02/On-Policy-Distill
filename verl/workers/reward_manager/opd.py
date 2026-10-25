@@ -704,6 +704,61 @@ class TeacherClient:
             return text[len(student_bos):]
         return text
 
+    @staticmethod
+    def _select_actual_teacher_logps(teacher_ids, topk_logps, topk_indices):
+        """Select the logprob of each token that is actually in the teacher sequence.
+
+        Row ``j`` predicts ``teacher_ids[j + 1]``. vLLM returns the sampled/
+        prompt token together with the top-k alternatives, but it does not
+        guarantee that the actual token is column zero. Fixed ``[:, 0]``
+        selection silently turns OPD into top-1 imitation and is especially
+        destructive for EOS when EOS is present in a nonzero column.
+        """
+        if topk_logps.ndim != 2 or topk_indices.ndim != 2:
+            raise RuntimeError(
+                "Teacher logprobs and token IDs must both be rank-2, got "
+                f"{tuple(topk_logps.shape)} and {tuple(topk_indices.shape)}"
+            )
+        if topk_logps.shape != topk_indices.shape:
+            raise RuntimeError(
+                "Teacher logprob/token-ID shape mismatch: "
+                f"{tuple(topk_logps.shape)} vs {tuple(topk_indices.shape)}"
+            )
+
+        n_rows = topk_logps.shape[0]
+        if len(teacher_ids) < n_rows + 1:
+            raise RuntimeError(
+                "Teacher sequence is too short for returned next-token logprobs: "
+                f"ids={len(teacher_ids)}, rows={n_rows}"
+            )
+
+        target_ids = torch.as_tensor(
+            teacher_ids[1 : n_rows + 1],
+            dtype=topk_indices.dtype,
+            device=topk_indices.device,
+        )
+        matches = topk_indices.eq(target_ids.unsqueeze(-1))
+        found = matches.any(dim=-1)
+        if not bool(found.all().item()):
+            missing_rows = (~found).nonzero(as_tuple=True)[0].tolist()
+            preview = [
+                {
+                    "row": row,
+                    "target_id": int(target_ids[row]),
+                    "returned_ids": [int(value) for value in topk_indices[row].tolist()],
+                }
+                for row in missing_rows[:8]
+            ]
+            raise RuntimeError(
+                "Teacher did not return the actual sequence token in its logprob columns; "
+                f"missing_rows={len(missing_rows)}/{n_rows}, preview={preview}. "
+                "Increase --n-logprobs or fix the teacher-server logprob contract."
+            )
+
+        selected_columns = matches.to(torch.int64).argmax(dim=-1)
+        selected_logps = topk_logps.gather(-1, selected_columns.unsqueeze(-1)).squeeze(-1)
+        return selected_logps, selected_columns
+
     def _strip_student_terminal(self, text: str):
         """Return response text without a trailing student terminal token."""
         student_bos = self.student_tokenizer.bos_token or ""
@@ -1525,13 +1580,18 @@ class TeacherClient:
 
             if self._is_same_tokenizer() and not self._uses_prompt_bridge():
                 # Same tokenizer: direct fill, no alignment needed.
-                # teacher_topk_logps[i][k, 0] predicts token at position k+1,
-                # so we shift right by 1: fill [1:] logprobs into positions [1:].
+                # Each selected logprob at row k predicts token k+1, so shift
+                # right by 1 and fill it at the predicted token's position.
                 # This way position j holds the logprob predicting token j,
                 # and core_algos can use [-R:] directly (no -1 offset).
                 for i in range(local_batch_size):
                     valid_pos = attention_mask[i].nonzero(as_tuple=True)[0]
-                    logps = teacher_topk_logps[i][:, 0]  # [N], predicts token 1..N
+                    teacher_ids = responses[i].tolist()
+                    logps, selected_columns = self._select_actual_teacher_logps(
+                        teacher_ids,
+                        teacher_topk_logps[i],
+                        teacher_topk_indices[i],
+                    )
                     # logps[0] predicts token 1, fill at valid_pos[1]
                     # logps[N-1] predicts token N (doesn't exist / last+1), skip it
                     n_fill = min(len(logps) - 1, len(valid_pos) - 1)
@@ -1563,6 +1623,10 @@ class TeacherClient:
                             "teacher_text": self.tokenizer.decode(tch_ids, skip_special_tokens=False),
                             "student_token_count": len(stu_ids),
                             "teacher_token_count": len(tch_ids),
+                            "teacher_actual_token_column_zero_ratio": float(
+                                (selected_columns == 0).float().mean().item()
+                            ),
+                            "teacher_actual_token_columns_sample": selected_columns[:50].tolist(),
                             "student_tokens": [
                                 {"id": tid, "text": student_tokenizer.decode([tid], skip_special_tokens=False)}
                                 for tid in stu_ids[:100]  # first 100 for brevity
@@ -1644,7 +1708,11 @@ class TeacherClient:
             for i in range(local_batch_size):
                 student_ids = input_ids[i]  # list[int], student prompt+response
                 teacher_ids = responses[i].tolist()  # list[int], teacher prompt+response+1 generated token
-                teacher_logps = teacher_topk_logps[i][:, 0]  # [teacher_seq_len - 1], top-1 logprob
+                teacher_logps, teacher_selected_columns = self._select_actual_teacher_logps(
+                    teacher_ids,
+                    teacher_topk_logps[i],
+                    teacher_topk_indices[i],
+                )
 
                 # --- Step A: Find response boundaries in both sequences ---
 
@@ -1834,6 +1902,19 @@ class TeacherClient:
                         if 0 <= teacher_eos_logp_idx < len(teacher_logps)
                         else None
                     )
+                    teacher_eos_column = (
+                        int(teacher_selected_columns[teacher_eos_logp_idx])
+                        if 0 <= teacher_eos_logp_idx < len(teacher_selected_columns)
+                        else None
+                    )
+                    teacher_eos_col0_id = (
+                        int(teacher_topk_indices[i][teacher_eos_logp_idx, 0])
+                        if 0 <= teacher_eos_logp_idx < len(teacher_topk_indices[i])
+                        else None
+                    )
+                    teacher_col0_actual_ratio = float(
+                        (teacher_selected_columns == 0).float().mean().item()
+                    )
                     mapping_available = (
                         student_terminal is not None
                         and teacher_terminal is not None
@@ -1848,7 +1929,9 @@ class TeacherClient:
                         f"[OPD EOS mapping] seq={i} available={mapping_available} "
                         f"student={_terminal_display(student_terminal)} "
                         f"teacher={_terminal_display(teacher_terminal)} "
-                        f"teacher_logp={logp_display}",
+                        f"teacher_logp={logp_display} selected_column={teacher_eos_column} "
+                        f"column0_token_id={teacher_eos_col0_id} "
+                        f"all_token_column0_ratio={teacher_col0_actual_ratio:.1%}",
                         flush=True,
                     )
 
