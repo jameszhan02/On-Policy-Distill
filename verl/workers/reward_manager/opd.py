@@ -1008,6 +1008,220 @@ class TeacherClient:
                       student_tokenizer, teacher_tokenizer, debug=False,
                       large_chunk_threshold=6,
                       ignore_one_leading_teacher_space=False):
+        """Align cross-tokenizer responses at shared decoded-prefix boundaries.
+
+        Decoding a middle token slice is not compositional for every tokenizer:
+        it can add a leading space or expose a temporary Unicode replacement
+        character.  The former greedy implementation compared such slices and
+        skipped the entire remaining response after one mismatch.  Prefix
+        boundaries are anchored to the complete decoded response instead, so
+        an unstable local boundary is absorbed into one chunk and alignment
+        resumes at the next shared boundary.
+        """
+        n_stu = len(student_ids)
+        n_tec = len(teacher_ids)
+        aligned = torch.full((n_stu,), float("inf"), dtype=teacher_logps.dtype)
+        chunk_ids = torch.full((n_stu,), -1, dtype=torch.float32)
+        chunk_details = []
+        alignment_stats = {
+            "matched_chunks": 0,
+            "matched_student_tokens": 0,
+            "matched_teacher_tokens": 0,
+            "trainable_chunks": 0,
+            "trainable_student_tokens": 0,
+            "trainable_teacher_tokens": 0,
+            "one_to_one_chunks": 0,
+            "response_student_tokens": n_stu,
+            "fallback_student_tokens": 0,
+            "large_chunk_student_tokens": 0,
+            "truncated_student_tokens": 0,
+        }
+
+        if n_stu == 0:
+            return aligned, chunk_ids, chunk_details, False, alignment_stats
+        if n_tec == 0:
+            alignment_stats["fallback_student_tokens"] = n_stu
+            alignment_stats["truncated_student_tokens"] = n_stu
+            return aligned, chunk_ids, chunk_details, True, alignment_stats
+
+        def decode(ids, tokenizer):
+            try:
+                text = tokenizer.decode(
+                    ids,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            except TypeError:
+                # Compatibility with lightweight tokenizer test doubles and
+                # older tokenizer implementations.
+                text = tokenizer.decode(ids, skip_special_tokens=False)
+            return unicodedata.normalize("NFC", text)
+
+        def prefix_boundaries(ids, tokenizer, strip_one_leading_space=False):
+            full_text = decode(ids, tokenizer)
+            if strip_one_leading_space and full_text.startswith(" "):
+                full_text = full_text[1:]
+
+            # normalized character offset -> number of consumed tokens
+            boundaries = {0: 0}
+            for end in range(1, len(ids) + 1):
+                prefix = decode(ids[:end], tokenizer)
+                if strip_one_leading_space and prefix.startswith(" "):
+                    prefix = prefix[1:]
+                # A partial byte sequence is not a stable boundary.  A later
+                # prefix normally replaces U+FFFD with the completed character.
+                if prefix.endswith("\ufffd"):
+                    continue
+                if len(prefix) <= len(full_text) and full_text.startswith(prefix):
+                    # Keep the latest token index for duplicate/zero-width
+                    # decoded boundaries.
+                    boundaries[len(prefix)] = end
+
+            # The complete response decode is authoritative even when an
+            # intermediate prefix is non-compositional.
+            boundaries[len(full_text)] = len(ids)
+            return full_text, boundaries
+
+        student_text, student_boundaries = prefix_boundaries(
+            student_ids, student_tokenizer
+        )
+        teacher_text, teacher_boundaries = prefix_boundaries(
+            teacher_ids,
+            teacher_tokenizer,
+            strip_one_leading_space=ignore_one_leading_teacher_space,
+        )
+
+        # Only equal decoded prefixes are synchronization points.  If the full
+        # responses are equal, their final boundary is guaranteed to resync
+        # after any missing local boundary.
+        shared_offsets = [
+            offset
+            for offset in sorted(set(student_boundaries) & set(teacher_boundaries))
+            if offset > 0 and student_text[:offset] == teacher_text[:offset]
+        ]
+
+        s_ptr = 0
+        t_ptr = 0
+        text_ptr = 0
+        chunk_count = 0
+        for offset in shared_offsets:
+            s_end = student_boundaries[offset]
+            t_end = teacher_boundaries[offset]
+            # Prefix cleanup can make an intermediate offset non-monotonic.
+            # Skip that boundary and resynchronize at a later one.
+            if s_end <= s_ptr or t_end <= t_ptr:
+                continue
+
+            n_stu_tokens = s_end - s_ptr
+            n_tec_tokens = t_end - t_ptr
+            chunk_logp = teacher_logps[t_ptr:t_end].sum()
+            is_large = (
+                n_stu_tokens > large_chunk_threshold
+                or n_tec_tokens > large_chunk_threshold
+            )
+
+            alignment_stats["matched_chunks"] += 1
+            alignment_stats["matched_student_tokens"] += n_stu_tokens
+            alignment_stats["matched_teacher_tokens"] += n_tec_tokens
+            if n_stu_tokens == 1 and n_tec_tokens == 1:
+                alignment_stats["one_to_one_chunks"] += 1
+
+            if is_large:
+                alignment_stats["large_chunk_student_tokens"] += n_stu_tokens
+            else:
+                aligned[s_ptr:s_end] = chunk_logp / n_stu_tokens
+                chunk_ids[s_ptr:s_end] = chunk_count
+                alignment_stats["trainable_chunks"] += 1
+                alignment_stats["trainable_student_tokens"] += n_stu_tokens
+                alignment_stats["trainable_teacher_tokens"] += n_tec_tokens
+
+            if debug:
+                chunk_details.append({
+                    "chunk_id": chunk_count,
+                    "text": student_text[text_ptr:offset],
+                    "s_start": s_ptr,
+                    "s_end": s_end,
+                    "t_start": t_ptr,
+                    "t_end": t_end,
+                    "n_stu": n_stu_tokens,
+                    "n_tec": n_tec_tokens,
+                    "teacher_logp_sum": chunk_logp.item(),
+                    "aligned_avg": aligned[s_ptr].item(),
+                    "type": "matched",
+                    "trainable": not is_large,
+                    "skip_reason": "large_chunk" if is_large else None,
+                    "teacher_tokens": [
+                        (
+                            teacher_ids[ti],
+                            teacher_logps[ti].item(),
+                            decode([teacher_ids[ti]], teacher_tokenizer),
+                        )
+                        for ti in range(t_ptr, t_end)
+                    ],
+                    "student_tokens": [
+                        (
+                            student_ids[si],
+                            decode([student_ids[si]], student_tokenizer),
+                        )
+                        for si in range(s_ptr, s_end)
+                    ],
+                })
+
+            s_ptr = s_end
+            t_ptr = t_end
+            text_ptr = offset
+            chunk_count += 1
+
+        # Skip only the genuinely unmatched suffix.  A local missing boundary
+        # no longer discards the rest of an otherwise identical response.
+        fallback_stu = n_stu - s_ptr
+        if fallback_stu:
+            alignment_stats["fallback_student_tokens"] = fallback_stu
+            if debug:
+                chunk_details.append({
+                    "chunk_id": chunk_count,
+                    "text": student_text[text_ptr:],
+                    "s_start": s_ptr,
+                    "s_end": n_stu,
+                    "t_start": t_ptr,
+                    "t_end": n_tec,
+                    "n_stu": fallback_stu,
+                    "n_tec": n_tec - t_ptr,
+                    "teacher_logp_sum": teacher_logps[t_ptr:n_tec].sum().item(),
+                    "aligned_avg": float("inf"),
+                    "type": "fallback",
+                    "student_full_text": student_text,
+                    "teacher_full_text": teacher_text,
+                })
+
+        # A strict teacher-text prefix with no teacher tokens left is genuine
+        # teacher-side truncation.  The caller intentionally skips that whole
+        # sequence rather than using partial teacher supervision.
+        teacher_truncated = (
+            len(teacher_text) < len(student_text)
+            and student_text.startswith(teacher_text)
+        )
+        if teacher_truncated:
+            alignment_stats["truncated_student_tokens"] = n_stu - s_ptr
+
+        if debug:
+            matched = alignment_stats["matched_student_tokens"]
+            trainable = alignment_stats["trainable_student_tokens"]
+            print(f"  [SUMMARY] {n_stu} student tokens, {n_tec} teacher tokens")
+            print(
+                f"  [STATS] prefix-boundary matched: {matched}/{n_stu} "
+                f"({matched / n_stu * 100:.1f}%), trainable: {trainable}/{n_stu} "
+                f"({trainable / n_stu * 100:.1f}%), fallback: {fallback_stu}/{n_stu} "
+                f"({fallback_stu / n_stu * 100:.1f}%)"
+            )
+
+        return aligned, chunk_ids, chunk_details, teacher_truncated, alignment_stats
+
+    @staticmethod
+    def _align_chunks_greedy_legacy(student_ids, teacher_ids, teacher_logps,
+                      student_tokenizer, teacher_tokenizer, debug=False,
+                      large_chunk_threshold=6,
+                      ignore_one_leading_teacher_space=False):
         """Align teacher logprobs to student token granularity via chunk-level greedy matching.
 
         Both student_ids and teacher_ids should be the *response content only*
@@ -1564,6 +1778,10 @@ class TeacherClient:
                     "trainable_student_tokens": 0,
                     "trainable_teacher_tokens": 0,
                     "one_to_one_chunks": 0,
+                    "response_student_tokens": 0,
+                    "fallback_student_tokens": 0,
+                    "large_chunk_student_tokens": 0,
+                    "truncated_student_tokens": 0,
                 }
                 for _ in range(local_batch_size)
             ]
@@ -1608,6 +1826,10 @@ class TeacherClient:
                         "trainable_student_tokens": response_tokens,
                         "trainable_teacher_tokens": response_tokens,
                         "one_to_one_chunks": response_tokens,
+                        "response_student_tokens": response_tokens,
+                        "fallback_student_tokens": 0,
+                        "large_chunk_student_tokens": 0,
+                        "truncated_student_tokens": 0,
                     }
 
                     # Dump for same-tokenizer case
@@ -1641,7 +1863,7 @@ class TeacherClient:
 
             # ============================================================
             # Cross-tokenizer alignment: align teacher logprobs to student
-            # token granularity using chunk-level greedy matching.
+            # token granularity at shared decoded-prefix boundaries.
             # ============================================================
 
             # We need:
@@ -1945,7 +2167,7 @@ class TeacherClient:
                 )
                 teacher_resp_logps = teacher_logps[teacher_resp_start_tok - 1 : teacher_resp_end_tok - 1]
 
-                # --- Step B: Chunk-level greedy alignment on response text ---
+                # --- Step B: Prefix-boundary alignment on response text ---
                 _do_dump_this_seq = (i < dump_num)
                 (
                     aligned_logps,
@@ -2062,6 +2284,7 @@ class TeacherClient:
                         ],
                         # Chunk alignment details
                         "chunk_alignment": seq_chunk_details,
+                        "alignment_stats": seq_alignment_stats,
                         # Final aligned logprobs for student tokens
                         "aligned_logps": aligned_logps.tolist(),
                         # Stats

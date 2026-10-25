@@ -41,6 +41,23 @@ class _PieceTokenizerStub:
         return "".join(self.pieces[token_id] for token_id in ids)
 
 
+class _ContextSensitiveTokenizerStub(_PieceTokenizerStub):
+    """Makes a middle slice decode differently from the same full prefix."""
+
+    def __init__(self, pieces: dict[int, str], middle_prefix: int, unstable_id: int | None = None):
+        super().__init__(pieces)
+        self.middle_prefix = middle_prefix
+        self.unstable_id = unstable_id
+
+    def decode(self, ids, skip_special_tokens: bool = False):
+        text = super().decode(ids, skip_special_tokens=skip_special_tokens)
+        if ids and ids[0] == self.middle_prefix:
+            return " " + text
+        if self.unstable_id is not None and ids and ids[-1] == self.unstable_id:
+            return text[:-1] + "\ufffd"
+        return text
+
+
 def _client() -> TeacherClient:
     client = TeacherClient.__new__(TeacherClient)
     client.prompt_bridge_mode = "r1_zero_llama_to_r1_zero"
@@ -205,3 +222,55 @@ def test_fused_space_think_boundary_is_found_and_aligns():
     assert truncated is False
     assert stats["matched_student_tokens"] == 4
     assert stats["trainable_student_tokens"] == 4
+
+
+def test_alignment_uses_prefixes_not_context_sensitive_middle_slices():
+    student_tokenizer = _PieceTokenizerStub({1: "a", 2: "b", 3: "c", 4: "d"})
+    teacher_tokenizer = _ContextSensitiveTokenizerStub(
+        {10: "a", 20: "b", 30: "c", 40: "d"},
+        middle_prefix=20,
+    )
+
+    aligned, chunk_ids, details, truncated, stats = TeacherClient._align_chunks(
+        [1, 2, 3, 4],
+        [10, 20, 30, 40],
+        torch.tensor([-1.0, -2.0, -3.0, -4.0]),
+        student_tokenizer,
+        teacher_tokenizer,
+        debug=True,
+    )
+
+    assert truncated is False
+    assert torch.isfinite(aligned).all()
+    assert (chunk_ids >= 0).all()
+    assert stats["matched_student_tokens"] == 4
+    assert stats["trainable_student_tokens"] == 4
+    assert stats["fallback_student_tokens"] == 0
+    assert all(detail["type"] == "matched" for detail in details)
+
+
+def test_alignment_resynchronizes_after_unstable_prefix_boundary():
+    student_tokenizer = _PieceTokenizerStub({1: "a", 2: "b", 3: "c", 4: "d"})
+    teacher_tokenizer = _ContextSensitiveTokenizerStub(
+        {10: "a", 20: "b", 30: "c", 40: "d"},
+        middle_prefix=-1,
+        unstable_id=20,
+    )
+
+    aligned, chunk_ids, _, truncated, stats = TeacherClient._align_chunks(
+        [1, 2, 3, 4],
+        [10, 20, 30, 40],
+        torch.tensor([-1.0, -2.0, -3.0, -4.0]),
+        student_tokenizer,
+        teacher_tokenizer,
+    )
+
+    assert truncated is False
+    assert torch.isfinite(aligned).all()
+    assert (chunk_ids >= 0).all()
+    assert stats["matched_student_tokens"] == 4
+    assert stats["trainable_student_tokens"] == 4
+    assert stats["fallback_student_tokens"] == 0
+    # The missing boundary at "ab" is absorbed into the next synchronized
+    # chunk instead of making tokens c/d an untrainable fallback tail.
+    assert stats["matched_chunks"] == 3

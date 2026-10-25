@@ -273,6 +273,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "trainable_student_tokens": "opd_alignment_trainable_student_tokens",
         "trainable_teacher_tokens": "opd_alignment_trainable_teacher_tokens",
         "one_to_one_chunks": "opd_alignment_one_to_one_chunks",
+        "response_student_tokens": "opd_alignment_response_student_tokens",
+        "fallback_student_tokens": "opd_alignment_fallback_student_tokens",
+        "large_chunk_student_tokens": "opd_alignment_large_chunk_student_tokens",
+        "truncated_student_tokens": "opd_alignment_truncated_student_tokens",
     }
     if all(key in batch.non_tensor_batch for key in alignment_keys.values()):
         totals = {
@@ -295,6 +299,22 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
                 ),
                 "opd_alignment/trainable_chunk_ratio": (
                     trainable_chunks / matched_chunks if matched_chunks else 0.0
+                ),
+                "opd_alignment/matched_student_token_ratio": (
+                    totals["matched_student_tokens"] / totals["response_student_tokens"]
+                    if totals["response_student_tokens"] else 0.0
+                ),
+                "opd_alignment/trainable_student_token_ratio": (
+                    totals["trainable_student_tokens"] / totals["response_student_tokens"]
+                    if totals["response_student_tokens"] else 0.0
+                ),
+                "opd_alignment/fallback_student_token_ratio": (
+                    totals["fallback_student_tokens"] / totals["response_student_tokens"]
+                    if totals["response_student_tokens"] else 0.0
+                ),
+                "opd_alignment/large_chunk_student_token_ratio": (
+                    totals["large_chunk_student_tokens"] / totals["response_student_tokens"]
+                    if totals["response_student_tokens"] else 0.0
                 ),
                 "opd_alignment/student_tokens_per_trainable_chunk": (
                     totals["trainable_student_tokens"] / trainable_chunks if trainable_chunks else 0.0
