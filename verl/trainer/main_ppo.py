@@ -487,6 +487,10 @@ if __name__ == "__main__":
         "OPD_TEACHER_PROMPT",
         "OPD_SUPERVISE_EOS",
         "OPD_CLIPPED_TAIL_SKIP_AFTER_TOKENS",
+        "OPD_SIGNAL_DEBUG",
+        "OPD_SIGNAL_DEBUG_PROMPTS",
+        "OPD_SIGNAL_DEBUG_ROLLOUTS_PER_PROMPT",
+        "OPD_SIGNAL_DEBUG_TOP_TOKENS",
         "OPD_TOKENIZER_DEBUG",
         "VERL_GSM8K_EVAL_PROMPT_TYPE",
         # OPD: alignment dump configuration

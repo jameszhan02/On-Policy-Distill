@@ -826,6 +826,74 @@ class RayPPOTrainer:
             score_mask = response_mask & (~torch.isinf(response_scores))
             scores = torch.where(score_mask, response_scores, 0.0).sum(-1).cpu().tolist()
 
+            # Optional sampled-token OPD audit. This compares the teacher and
+            # rollout-policy logprob on exactly the tokens the student sampled,
+            # then groups multiple rollouts of the same prompt. It answers the
+            # key diagnostic question: does the teacher assign a meaningfully
+            # different signal to correct vs. incorrect student trajectories?
+            signal_debug = os.environ.get("OPD_SIGNAL_DEBUG", "0").strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+            signal_summaries = []
+            token_signal_rows = []
+            if signal_debug and "old_log_probs" in batch.batch:
+                student_scores = batch.batch["old_log_probs"]
+                if student_scores.shape[-1] != response_mask.shape[-1]:
+                    student_scores = student_scores[:, -response_mask.shape[-1] :]
+
+                for sample_idx in range(response_mask.shape[0]):
+                    valid_signal = score_mask[sample_idx]
+                    if response_chunk_ids is not None:
+                        valid_signal = valid_signal & (
+                            response_chunk_ids[sample_idx] != -1
+                        )
+                    positions = valid_signal.nonzero(as_tuple=True)[0]
+                    teacher_values = response_scores[sample_idx, positions]
+                    student_values = student_scores[sample_idx, positions]
+                    deltas = teacher_values - student_values
+
+                    if positions.numel() > 0:
+                        summary = {
+                            "n_signal_tokens": int(positions.numel()),
+                            "teacher_logp_per_token": float(teacher_values.mean().item()),
+                            "student_logp_per_token": float(student_values.mean().item()),
+                            "delta_mean": float(deltas.mean().item()),
+                            "delta_abs_mean": float(deltas.abs().mean().item()),
+                            "delta_positive_ratio": float((deltas > 0).float().mean().item()),
+                        }
+                    else:
+                        summary = {
+                            "n_signal_tokens": 0,
+                            "teacher_logp_per_token": None,
+                            "student_logp_per_token": None,
+                            "delta_mean": None,
+                            "delta_abs_mean": None,
+                            "delta_positive_ratio": None,
+                        }
+                    signal_summaries.append(summary)
+
+                    rows = []
+                    for local_idx, pos in enumerate(positions.tolist()):
+                        token_id = int(batch.batch["responses"][sample_idx, pos].item())
+                        chunk_id = (
+                            int(response_chunk_ids[sample_idx, pos].item())
+                            if response_chunk_ids is not None
+                            else None
+                        )
+                        rows.append({
+                            "position": pos,
+                            "token_id": token_id,
+                            "token_text": self.tokenizer.decode(
+                                [token_id], skip_special_tokens=False
+                            ),
+                            "teacher_logp": float(teacher_values[local_idx].item()),
+                            "student_logp": float(student_values[local_idx].item()),
+                            "delta": float(deltas[local_idx].item()),
+                            "chunk_id": chunk_id,
+                            "is_eos_chunk": chunk_id == -2,
+                        })
+                    token_signal_rows.append(rows)
+
             terminal_ids = set()
             if self.tokenizer.eos_token_id is not None:
                 terminal_ids.add(self.tokenizer.eos_token_id)
@@ -847,10 +915,91 @@ class RayPPOTrainer:
                     )
                     if response_chunk_ids is not None:
                         eos_teacher_supervised = eos_teacher_supervised and bool(
-                            (response_chunk_ids[sample_idx, last_pos] >= 0).item()
+                            (response_chunk_ids[sample_idx, last_pos] != -1).item()
                         )
                 diagnosis["eos_generated"] = eos_generated
                 diagnosis["eos_teacher_supervised"] = eos_teacher_supervised
+
+            if signal_debug and signal_summaries:
+                for summary, diagnosis in zip(signal_summaries, diagnoses, strict=True):
+                    summary["answer_correct"] = bool(diagnosis["answer_correct"])
+                    summary["format_valid"] = bool(diagnosis["format_valid"])
+                    summary["eos_generated"] = bool(diagnosis["eos_generated"])
+
+                grouped_indices = defaultdict(list)
+                for sample_idx, prompt in enumerate(inputs):
+                    grouped_indices[prompt].append(sample_idx)
+
+                debug_prompt_count = max(
+                    1, int(os.environ.get("OPD_SIGNAL_DEBUG_PROMPTS", "2"))
+                )
+                debug_rollouts_per_prompt = max(
+                    1, int(os.environ.get("OPD_SIGNAL_DEBUG_ROLLOUTS_PER_PROMPT", "4"))
+                )
+                debug_top_tokens = max(
+                    1, int(os.environ.get("OPD_SIGNAL_DEBUG_TOP_TOKENS", "8"))
+                )
+
+                print(
+                    f"\n=== OPD sampled-token signal audit | step {self.global_steps} ===",
+                    flush=True,
+                )
+                for prompt_idx, (_, sample_indices) in enumerate(grouped_indices.items()):
+                    if prompt_idx >= debug_prompt_count:
+                        break
+                    chosen = sample_indices[:debug_rollouts_per_prompt]
+                    correct_count = sum(
+                        int(signal_summaries[idx]["answer_correct"]) for idx in chosen
+                    )
+                    print(
+                        f"[prompt group {prompt_idx}] rollouts={len(chosen)} "
+                        f"correct={correct_count}/{len(chosen)}",
+                        flush=True,
+                    )
+                    for sample_idx in chosen:
+                        summary = signal_summaries[sample_idx]
+                        print(
+                            f"  [rollout {sample_idx}] correct={summary['answer_correct']} "
+                            f"format={summary['format_valid']} eos={summary['eos_generated']} "
+                            f"tokens={summary['n_signal_tokens']} "
+                            f"teacher={summary['teacher_logp_per_token']} "
+                            f"student={summary['student_logp_per_token']} "
+                            f"delta_mean={summary['delta_mean']} "
+                            f"|delta|={summary['delta_abs_mean']} "
+                            f"positive={summary['delta_positive_ratio']}",
+                            flush=True,
+                        )
+
+                        rows = token_signal_rows[sample_idx]
+                        most_negative = sorted(rows, key=lambda row: row["delta"])[
+                            :debug_top_tokens
+                        ]
+                        most_positive = sorted(
+                            rows, key=lambda row: row["delta"], reverse=True
+                        )[:debug_top_tokens]
+                        print("    teacher rejects most:", flush=True)
+                        for row in most_negative:
+                            print(
+                                f"      pos={row['position']:>3} "
+                                f"token={row['token_text']!r} "
+                                f"T={row['teacher_logp']:.4f} "
+                                f"S={row['student_logp']:.4f} "
+                                f"delta={row['delta']:+.4f} "
+                                f"chunk={row['chunk_id']}",
+                                flush=True,
+                            )
+                        print("    teacher favors most:", flush=True)
+                        for row in most_positive:
+                            print(
+                                f"      pos={row['position']:>3} "
+                                f"token={row['token_text']!r} "
+                                f"T={row['teacher_logp']:.4f} "
+                                f"S={row['student_logp']:.4f} "
+                                f"delta={row['delta']:+.4f} "
+                                f"chunk={row['chunk_id']}",
+                                flush=True,
+                            )
+                print("=== End OPD sampled-token signal audit ===\n", flush=True)
 
             console_samples = max(0, int(os.environ.get("VERL_CONSOLE_ROLLOUT_SAMPLES", "0")))
             max_chars = max(200, int(os.environ.get("VERL_CONSOLE_ROLLOUT_MAX_CHARS", "2000")))
@@ -898,6 +1047,9 @@ class RayPPOTrainer:
             ):
                 reward_extra_infos_to_dump[key] = [diagnosis[key] for diagnosis in diagnoses]
             reward_extra_infos_to_dump["teacher_logp_sum"] = scores
+            if signal_debug and signal_summaries:
+                reward_extra_infos_to_dump["opd_signal_summary"] = signal_summaries
+                reward_extra_infos_to_dump["opd_token_signals"] = token_signal_rows
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_to_dump.setdefault(
                     "request_id",
